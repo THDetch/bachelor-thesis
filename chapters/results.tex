@@ -125,7 +125,7 @@ These qualitative and quantitative improvements demonstrate the capability of th
     \textbf{(iv)}~ground-truth Sentinel-2 image. All optical images are depicted in RGB (B4, B4, B2) batch.}
     \label{fig:qualitative_results_100_20}
 \end{figure}
-
+\clearpage
 \section{Results Across Individual Optical Bands}
 Another objective of this work was to assess the model’s ability to reliably reconstruct each optical band individually and to evaluate the extent of its accuracy across the spectrum. 
 For this purpose, the model trained on the full winter subset was evaluated separately for all Sentinel-2 bands, and the corresponding results are summarized in Table~\ref{tab:per_band_validation}.
@@ -282,5 +282,4 @@ The qualitative results shown in Figure~\ref{fig:qualitative_results_cloud_remov
 \end{figure}
 
 Overall, both the qualitative and quantitative results confirm the model’s ability to generate high-quality, cloud-free optical images across all 13 spectral bands solely from SAR inputs, thereby effectively addressing the cloud cover problem. However, since the model was trained exclusively on translating SAR to cloud-free optical images, the thickness or density of clouds does not influence the reconstruction process.
-% \textcolor{red}{For future work, incorporating both SAR and cloud-contaminated optical inputs to generate cloud-free outputs that more closely mimic the reference images is recommended.}
-
+\clearpage
