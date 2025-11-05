@@ -1,3 +1,34 @@
+\chapter{Intermediate Outputs during Training}
+\label{appendix:intermediate_visuals}
+\begin{figure}[!htbp]
+  \centering
+  \renewcommand{\arraystretch}{1.0}
+  \adjustbox{max width=\textwidth, max totalheight=0.7\textheight, keepaspectratio}{
+    \begin{tabular}{c c@{\hspace{40pt}}c}
+      \rotatebox{90}{\hspace{3pt}\textbf{SAR RGB}} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/sample_05_sarRGB.png} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/sample_04_sarRGB.png} \\
+      \rotatebox{90}{\hspace{3pt}\textbf{Epoch 1}} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/001_sample_05_pred.png} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/001_sample_04_pred.png} \\
+      \rotatebox{90}{\hspace{3pt}\textbf{Epoch 51}} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/051_sample_05_pred.png} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/051_sample_04_pred.png} \\
+      \rotatebox{90}{\hspace{3pt}\textbf{Epoch 101}} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/101_sample_05_pred.png} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/101_sample_04_pred.png} \\
+      \rotatebox{90}{\hspace{3pt}\textbf{Epoch 150}} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/150_sample_05_pred.png} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/150_sample_04_pred.png} \\
+      \rotatebox{90}{\hspace{3pt}\textbf{Ground truth}} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/sample_05_tgt.png} &
+      \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/sample_04_tgt.png} \\
+    \end{tabular}
+  } % end adjustbox
+  \caption[Intermediate results during training]{Evolution of generated optical images across training epochs for two samples (columns). Rows show pseudo-RGB SAR input (R: VV, G: VH, B: VV7VH), generated optical images after epochs 1, 51, 101, 150, and the ground truth.}
+  \label{fig:intermediate_training}
+\end{figure}
+
 \chapter{Bandwise Grayscale Reconstructions}
 \label{appendix:bandwise_results}
 
@@ -245,3 +276,43 @@ Summer & 0.800 & 22.79 & 0.268 & 12.43 \\
     \label{fig:appendix_summer}
 \end{figure}
 
+\chapter{Value Distributions of Individual Optical Bands}
+\label{appendix:data_ranges}
+% ----------------------------------------------------------
+\begin{figure}[!htbp]
+  \centering
+
+  % First histogram
+  \adjustbox{max width=0.98\textwidth, max totalheight=0.45\textheight, keepaspectratio}{
+    \includegraphics{img/data_ranges/sample_1.png}
+  }
+  \vspace{0.8em}
+
+  % Second histogram
+  \adjustbox{max width=0.98\textwidth, max totalheight=0.45\textheight, keepaspectratio}{
+    \includegraphics{img/data_ranges/sample_2.png}
+  }
+  \label{fig:data_ranges_12}
+\end{figure}
+
+\FloatBarrier % ensure next figure pair appears after this one
+
+\begin{figure}[!htbp]
+  \centering
+  % Third histogram
+  \adjustbox{max width=0.95\textwidth, max totalheight=0.45\textheight, keepaspectratio}{
+    \includegraphics{img/data_ranges/sample_3.png}
+  }
+  \vspace{0.8em}
+
+  % Fourth histogram
+  \adjustbox{max width=0.95\textwidth, max totalheight=0.45\textheight, keepaspectratio}{
+    \includegraphics{img/data_ranges/sample_4.png}
+  }
+
+  \caption[Value distributions of individual optical bands]{Value distributions of the individual optical bands.
+  The plots show per-band reflectance range and relative scaling across spectral channels.}
+  \label{fig:data_ranges_34}
+\end{figure}
+
+\FloatBarrier

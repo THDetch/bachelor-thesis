@@ -1,11 +1,11 @@
 \chapter{Results}
 \label{chapter:results}
-This chapter presents the experimental results and analyses of the Pix2Pix model across multiple evaluation settings. Both quantitative and qualitative assessments are conducted to examine the model’s performance in translating Sentinel-1 SAR imagery into full-spectrum Sentinel-2 optical outputs. The primary objectives are to evaluate the model’s reconstruction capability, investigate the influence of training data scale, and assess its ability in cloud removal.
+Both quantitative and qualitative assessments are conducted to examine the model’s performance in translating Sentinel-1 SAR imagery into full-spectrum Sentinel-2 optical outputs. The primary objectives are to evaluate the model’s reconstruction capability, investigate the influence of training data scale, and assess its ability in cloud removal.
 Given the high sensitivity of GAN-based frameworks to hyperparameter choices, several experimental configurations were explored to ensure stable convergence and high-quality reconstructions. Initial experiments were performed using 20\% of the winter subset to efficiently test different settings. However, the results obtained with this limited data were unsatisfactory. Following the hypothesis that training on a larger dataset would enhance performance, the model was subsequently trained on the entire winter subset, consisting of 31,825 image pairs.
 Beyond the dataset-scale comparison, additional analyses examine the reconstruction quality across individual Sentinel-2 bands and evaluate the model’s ability to remove cloud contamination using the complementary SEN12-MS-CR dataset. Together, these experiments provide a comprehensive view of the model’s spatial, spectral, and perceptual performance under realistic remote-sensing scenarios.
 
 \section{Results on 20\% of the Winter Subset}
-In the initial stage of experimentation, only 20\% of the data were used for training. From the 31,825 image pairs in the winter subset, 3,215, 981, and 981 pairs were allocated for training, validation, and testing, respectively. The model was trained to reconstruct the full optical spectrum consisting of 13 bands, using the dual VV and VH polarization SAR data as input.
+In the initial stage of experimentation, only 20\% of the data were used for training. From the 31,825 image pairs in the winter subset, 3,215 pairs were allocated for training, 981 for validation, and 981 for testing. The model was trained to reconstruct the full optical spectrum consisting of 13 bands, using the dual VV and VH polarization SAR data as input.
 The preprocessing steps, training pipeline, and hyperparameter settings were identical to those described previously and were applied unchanged to the experiments on the full winter subset. Moreover, the training was conducted using the full combination of loss functions, as discussed in Section~\ref{subsec:losses}.
 
 \begin{figure}[!htbp]
@@ -15,6 +15,7 @@ The preprocessing steps, training pipeline, and hyperparameter settings were ide
 
     \begin{tabular}{c *{3}{c}}
         % ------------------- Row 1 -------------------
+        & (i) & (ii) & (iii)  \\
         \textbf{(a)} &
         \includegraphics[width=0.2\textwidth, height=0.2\textheight, keepaspectratio]{img/qualitative-20/sample_1/sar.png} &
         \includegraphics[width=0.2\textwidth, height=0.2\textheight, keepaspectratio]{img/qualitative-20/sample_1/gen.png} &
@@ -38,9 +39,9 @@ The preprocessing steps, training pipeline, and hyperparameter settings were ide
     \caption[Qualitative results of 20\% training winter subset]{%
     Qualitative results of 20\% training winter subset.
     Columns: 
-    \textbf{(i)}~SAR input (pseudo RGB), 
+    \textbf{(i)}~SAR input (pseudo RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)}~model-generated optical image, 
-    \textbf{(iii)}~ground-truth Sentinel-2 image. All optical images throughout this thesis are depicted in RGB (B4, B3, B2) batch.}
+    \textbf{(iii)}~ground-truth Sentinel-2 image. All optical images throughout this thesis are depicted in RGB (B4, B3, B2) stack.}
     \label{fig:qualitative_results_20}
 \end{figure}
 
@@ -65,7 +66,7 @@ Overall, these observations, together with the quantitative results presented in
 \section{Results on the Full Winter Subset}
 GAN-based models generally require large amounts of training data to achieve high-quality image generation, particularly when using mono-temporal SAR imagery as input for translation to optical domains~\cite{sar_2_opt_CGAN_survey_taxonomy}, and especially when reconstructing the full spectral range. Since training on only 20\% of the dataset did not yield satisfactory results, an additional experiment was conducted using the full winter subset, which comprises 31,825 samples divided in an 8:1:1 ratio for training, validation, and testing. This corresponds to approximately 25,460 samples for training and 3,180 samples each for validation and testing. The data preprocessing procedure, training pipeline, and hyperparameters were kept identical to those used in the 20\% experiment to ensure that the effect of training data size was isolated and directly evaluated.
 
-The model required approximately 25$\sim$hours to complete 150~epochs of training. The experimental hypothesis was confirmed: increasing the size of the training dataset led to a clear improvement in model performance. As shown in Table~\ref{tab:quantitative_result_scale}, expanding the training data from 20\% to the full winter subset resulted in substantial gains across all evaluation metrics. In particular, the LPIPS score decreased from 0.224 to 0.173, indicating that the model trained on the full dataset produced outputs with higher perceptual similarity to the ground truth. Likewise, the median SAM value dropped from 6.71° to 4.41°, demonstrating a notable enhancement in spectral consistency across all bands. Furthermore, PSNR increased by approximately 5$\sim$dB, while MAE and RMSE decreased by more than 25\%, confirming the strong positive effect of data scale on reconstruction quality.
+The model required approximately 25$\sim$hours, using the hardware described in~\ref{subsec:experimental_setup}, to complete 150~epochs of training. The experimental hypothesis was confirmed: increasing the size of the training dataset led to a clear improvement in model performance. As shown in Table~\ref{tab:quantitative_result_scale}, expanding the training data from 20\% to the full winter subset resulted in substantial gains across all evaluation metrics. In particular, the LPIPS score decreased from 0.224 to 0.173, indicating that the model trained on the full dataset produced outputs with higher perceptual similarity to the ground truth. Likewise, the median SAM value dropped from 6.71° to 4.41°, demonstrating a notable enhancement in spectral consistency across all bands. Furthermore, PSNR increased by approximately 5$\sim$dB, while MAE and RMSE decreased by more than 25\%, confirming the strong positive effect of data scale on reconstruction quality.
 
 \begin{table}[!htbp]
     \centering
@@ -91,6 +92,7 @@ These qualitative and quantitative improvements demonstrate the capability of th
 
     \begin{tabular}{c *{4}{c}}
         % ------------------- Row 1 -------------------
+         & (i) & (ii) & (iii) & (iv) \\
         \textbf{(a)} &
         \includegraphics[width=0.2\textwidth, height=0.2\textheight, keepaspectratio]{img/qualitative-20-full/sample_1/sar.png} &
         \includegraphics[width=0.2\textwidth, height=0.2\textheight, keepaspectratio]{img/qualitative-20-full/sample_1/gen_0.2.png} &
@@ -117,7 +119,7 @@ These qualitative and quantitative improvements demonstrate the capability of th
 
     \caption[Qualitative results for different training data scales: 20\% \& 100\%]{%
     Qualitative comparison of models trained on 20\% and 100\% of the dataset. 
-    Columns: \textbf{(i)}~SAR input (pseudo-RGB), 
+    Columns: \textbf{(i)}~SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)}~generated optical image from 20\% training, 
     \textbf{(iii)}~generated optical image from 100\% training, and 
     \textbf{(iv)}~ground-truth Sentinel-2 image. All optical images are depicted in RGB (B4, B4, B2) batch.}
@@ -132,7 +134,7 @@ When comparing the reconstruction quality across individual bands, the focus is 
 \begin{table}[!htbp]
 \centering
 \caption[Per-band validation results for full dataset training]{%
-Per-band quantitative validation results of the Pix2Pix model trained on the full winter subset. Each Sentinel-2 band’s central wavelength, spectral designation, and native spatial resolution are listed for reference. Best results are highlighted in \textcolor{green!50!black}{green} and worst in \textcolor{red!70!black}{red}.}
+Per-band quantitative validation results of the Pix2Pix model trained on the full winter subset. Each Sentinel-2 band’s central wavelength, spectral designation, and native spatial resolution are listed for reference. Arrows ($\uparrow$ / $\downarrow$) indicate whether higher or lower values denote better performance, respectively. Best results are highlighted in \textcolor{green!50!black}{green} and worst in \textcolor{red!70!black}{red}.}
 \resizebox{0.9\textwidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
@@ -209,12 +211,12 @@ To visually complement the quantitative assessment, representative grayscale exa
 
 \section{Results on Cloud Removal}
 \label{sec:cloud_removal}
-Cloud contamination remains one of the most persistent challenges in the field of remote sensing. To evaluate the model’s capability to address this issue, the model trained on the complete winter subset of the SEN12-MS dataset was assessed using the complementary SEN12-MS-CR dataset (see Section~\ref{sec:datasets}). The SEN12-MS-CR dataset consists of triplets comprising SAR images, cloud-contaminated optical images, and their corresponding cloud-free optical references, covering identical geographic regions across all 13 Sentinel-2 spectral bands.
+To evaluate the model’s capability to address this issue, the model trained on the complete winter subset of the SEN12-MS dataset was assessed using the complementary SEN12-MS-CR dataset (see Section~\ref{sec:datasets}). The SEN12-MS-CR dataset consists of triplets comprising SAR images, cloud-contaminated optical images, and their corresponding cloud-free optical references, covering identical geographic regions across all 13 Sentinel-2 spectral bands.
 For quantitative evaluation, a subset of 2,000 samples from the winter portion of the SEN12-MS-CR dataset was used. The evaluation data underwent identical preprocessing and clipping procedures as described in Section~\ref{subsec:preprocessing}, ensuring consistency with the model’s training conditions.
 
 \begin{table}[!htbp]
     \centering
-    \caption[Quantitative results on cloud removal]{Quantitative evaluation of different models trained on the full winter subset of the SEN12-MS dataset, assessed on the complementary SEN12-MS-CR dataset for the \textbf{cloud removal} task.}
+    \caption[Quantitative results on cloud removal]{Quantitative evaluation of different models trained on the full winter subset of the SEN12-MS dataset, assessed on the complementary SEN12-MS-CR dataset for the cloud removal task. Arrows ($\uparrow$ / $\downarrow$) indicate whether higher or lower values denote better performance, respectively.}
     \begin{tabular}{lcccc}
         \toprule
         \textbf{Model}               & \textbf{SSIM $\uparrow$} & \textbf{PSNR (dB) $\uparrow$} & \textbf{LPIPS $\downarrow$} & \textbf{SAM (°) $\downarrow$} \\
@@ -230,7 +232,7 @@ For quantitative evaluation, a subset of 2,000 samples from the winter portion o
 
 The quantitative results presented in Table~\ref{tab:quantitative_result_cr} demonstrate that the model attains robust and high-quality performance in cloud removal on the SEN12-MS-CR dataset, despite not being explicitly trained for this task or on this dataset. Notably, the reconstruction accuracy surpasses that achieved on the model’s own training subset (SEN12-MS) across all evaluated metrics. The spectral fidelity, measured by the SAM, improved by approximately one degree, indicating better preservation of spectral characteristics. Remarkably, the trained Pix2Pix model even outperforms several specialized approaches, including DiffCR~\cite{DiffCR}, the current state-of-the-art model for cloud removal on SEN12-MS-CR—an outcome that was beyond the original scope of this thesis. This result is particularly significant given that Pix2Pix is typically employed as a baseline model in related studies and is often reported to yield the lowest performance among compared methods 
 
-The qualitative results shown in Figure~\ref{fig:qualitative_results_cloud_removal} further illustrate the model’s effectiveness in removing cloud contamination. The model successfully reconstructs cloud-free optical imagery from the corresponding SAR inputs, even when the reference optical images are heavily obscured. As seen in rows (a) and (b), the model accurately restores regions affected by thin cloud cover while preserving structural and textural details. In partially occluded cases, illustrated in (c) and (d), the reconstructed outputs maintain clear boundaries, sharp edges, and consistent color representation. Remarkably, even for fully cloud-covered scenes, as in (e), the model generates realistic optical imagery and reliably reproduces urban and structural features.
+The qualitative results shown in Figure~\ref{fig:qualitative_results_cloud_removal} further illustrate the model’s effectiveness in removing cloud contamination. The model successfully reconstructs cloud-free optical imagery from the corresponding SAR inputs, even when the reference optical images are heavily obscured. As seen in rows (a) and (b), the model accurately restores regions affected by thin cloud cover while preserving structural and textural details. In partially occluded cases, illustrated in (c) and (d), the reconstructed outputs maintain clear boundaries, sharp edges, and consistent color representation. Remarkably, even for fully cloud-covered scenes, as in (e), the model generates realistic optical imagery and successfully reproduces urban and structural features.
 
 \begin{figure}[!htbp]
     \centering
@@ -239,6 +241,7 @@ The qualitative results shown in Figure~\ref{fig:qualitative_results_cloud_remov
 
     \begin{tabular}{c *{4}{c}}
         % ------------------- Row 1 -------------------
+        & (i) & (ii) & (iii) & (iv) \\
         \textbf{(a)} &
         \includegraphics[width=0.2\textwidth, height=0.2\textheight, keepaspectratio]{img/cloud_removal/sample_000881_sar_pseudo.png} &
         \includegraphics[width=0.2\textwidth, height=0.2\textheight, keepaspectratio]{img/cloud_removal/sample_000881_cloudy_rgb.png} &
@@ -271,11 +274,13 @@ The qualitative results shown in Figure~\ref{fig:qualitative_results_cloud_remov
     \caption[Qualitative results on cloud removal]{%
     Qualitative results of the model trained on the full winter subset of the SEN12-MS dataset, evaluated on the complementary SEN12-MS-CR dataset for the \textbf{cloud removal} task.  
     Columns: 
-    \textbf{(i)}~SAR input (pseudo-RGB), 
+    \textbf{(i)}~SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)}~reference cloud-contaminated optical image, 
     \textbf{(iii)}~generated cloud-free optical image, and 
     \textbf{(iv)}~reference cloud-free optical image (ground truth).}
     \label{fig:qualitative_results_cloud_removal}
 \end{figure}
 
-Overall, both the qualitative and quantitative results confirm the model’s ability to generate high-quality, cloud-free optical images across all 13 spectral bands solely from SAR inputs, thereby effectively addressing the cloud cover problem. However, since the model was trained exclusively on translating SAR to cloud-free optical images, the thickness or density of the clouds does not appear to influence the reconstruction process. For future work, incorporating both SAR and cloud-contaminated optical inputs to generate cloud-free outputs that more closely mimic the reference images is recommended.
+Overall, both the qualitative and quantitative results confirm the model’s ability to generate high-quality, cloud-free optical images across all 13 spectral bands solely from SAR inputs, thereby effectively addressing the cloud cover problem. However, since the model was trained exclusively on translating SAR to cloud-free optical images, the thickness or density of clouds does not influence the reconstruction process.
+\textcolor{red}{For future work, incorporating both SAR and cloud-contaminated optical inputs to generate cloud-free outputs that more closely mimic the reference images is recommended.}
+

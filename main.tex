@@ -29,6 +29,9 @@
 \usepackage{pgfplots}
 \usepackage{listings}
 \usepackage{colortbl}
+\usepackage{rotating}   % for \rotatebox
+\usepackage{pdflscape}
+\usepackage{placeins}   % for \FloatBarrier
 
 \usepackage{ragged2e}
 \newcolumntype{Y}{>{\RaggedRight\arraybackslash}X}
@@ -130,6 +133,14 @@
 % \bibliography{references}
 \clearpage
 \appendix
+\makeatletter
+\renewcommand{\@makechapterhead}[1]{%
+  {\parindent \z@ \normalfont
+   \LARGE\bfseries      % <-- \large: change to \normalsize or \small if you want smaller
+   \thechapter\quad #1\par\nobreak\vskip 20pt}}
+\makeatother
+% the above snippet changes the size of the appendix headers
+% \renewcommand{\thechapter}{\Alph{chapter}.}
 \input{chapters/appendix.tex}
 
 \begingroup
