@@ -196,6 +196,7 @@ Following common practices in the literature as in ~\cite{CR_SEN2_dRNN, c_guided
 After clipping, all values were linearly normalized to the \textit{tanh} range \([-1, 1]\), consistent with the \texttt{Tanh} activation function used in the generator’s output layer. The original image size of \(256 \times 256\) pixels was preserved, and no data augmentation was applied, as the dataset already exhibits substantial spatial diversity, given that the regions of interest (ROIs) were sampled globally across all inhabited continents.
 
 \section{Pix2Pix Model}
+\label{sec:pix2pix_model}
 The image translation task in this thesis is addressed using the Pix2Pix model, originally introduced by Isola et al.~\cite{pix2pix_2018}. The Pix2Pix framework has gained substantial recognition not only in general image-to-image translation~\cite{S2MS_GAN}, but also within the domain of SAR-to-optical translation. It is frequently employed as a baseline model as in~\cite{s2opt_LULC, assessing_MT_cGANS_s2o_crop, CR_SEN2_dRNN, cr_fuse_HR_GEN, hvt_cgan, trans_gan_CF}, or further adapted and extended in various studies~\cite{A_cGAN_fuse_sar_MS_CR, s2opt_LULC}. Owing to its demonstrated effectiveness and widespread adoption in related research, Pix2Pix was selected as the primary model for the experiments conducted in this thesis.
 
 Pix2Pix is based on the concept of conditional generative adversarial networks (cGANs), which extend the original GAN formulation by conditioning both the generator and discriminator on an input image. In this setup, the generator $G$ learns to map an input image $x$ to an output image $y$, while the discriminator $D$ learns to distinguish between real image pairs $\{x, y\}$ and synthesized pairs $\{x, G(x)\}$. This adversarial objective encourages the generated outputs to be both realistic and structurally consistent with the given input.
@@ -213,9 +214,9 @@ The final objective is then:
 \begin{equation}
     G^* = \arg \min_G \max_D \; \mathcal{L}_{cGAN}(G,D) + \lambda \mathcal{L}_{\ell_1}(G),
 \end{equation}
-where $\lambda$ balances realism and reconstruction accuracy. Following the originally proposed configurations in~\cite{pix2pix_2018}, $\lambda = 100$ is typically used. In addition, supplementary loss components were incorporated, as they demonstrated improved training convergence and led to higher-quality reconstructions (see the ablation study on loss functions in Section~\ref{subsec:ablation_loss}).
+where $\lambda$ balances realism and reconstruction accuracy. Following the original configuration proposed in~\cite{pix2pix_2018}, a weighting factor of \(\lambda = 100\) is commonly used in the literature~\cite{A_cGAN_fuse_sar_MS_CR, Mult_temp_S12_fus, quality_assessment_S2OT, CR_RS_GAN_s2o, trans_gan_CF, assessing_MT_cGANS_s2o_crop} and is therefore also adopted in the present thesis. In addition, supplementary loss components were incorporated, as they demonstrated improved training convergence and led to higher-quality reconstructions (see the ablation study on loss functions in Section~\ref{subsec:ablation_loss}).
 
-The generator is implemented as a U-Net encoder–decoder~\cite{U_net_2015}. Unlike a plain encoder–decoder, U-Net introduces skip connections between corresponding downsampling and upsampling layers, allowing low-level spatial details from the input to directly propagate to the output. This design is particularly effective in tasks where the input and output share spatial structures, such as SAR-to-optical translation.
+In Pix2Pix, The generator is implemented as a U-Net encoder–decoder~\cite{U_net_2015}. Unlike a plain encoder–decoder, U-Net introduces skip connections between corresponding downsampling and upsampling layers, allowing low-level spatial details from the input to directly propagate to the output. This design is particularly effective in tasks where the input and output share spatial structures, such as SAR-to-optical translation.
 
 The discriminator follows a PatchGAN architecture, which classifies local $N \times N$ image patches as real or fake instead of operating on the entire image~\cite{pix2pix_2018}. This approach emphasizes high-frequency accuracy and enforces local realism, while the $\ell_1$ term ensures global structural coherence. The original work demonstrated that a patch size of $70 \times 70$ provides a good trade-off between reconstruction quality and computational efficiency.
 
@@ -254,19 +255,23 @@ where:
     \item $\mathcal{L}_{\text{LPIPS}}$ denotes the Learned Perceptual Image Patch Similarity loss, which captures high-level perceptual differences.
     \item $\lambda_{\text{L1}}, \lambda_{\text{SSIM}},$ and $\lambda_{\text{LPIPS}}$ are weighting coefficients that control the relative contribution of each term.
 \end{itemize}
-
-In the experiments, the weighting coefficients were set to
-$\lambda_{\text{L1}} = 100.0$, 
-$\lambda_{\text{SSIM}} = 50.0$, and 
-$\lambda_{\text{LPIPS}} = 50.0$.
-These values were empirically determined to balance pixel-level accuracy, perceptual quality, and adversarial realism. 
+In the experiments, the weighting coefficients were set as follows: 
+\(\lambda_{\text{L1}} = 100.0\) (as originally proposed in the Pix2Pix model and commonly used in the literature; see~\ref{sec:pix2pix_model}). 
+Both \(\lambda_{\text{SSIM}}\) and \(\lambda_{\text{LPIPS}}\) were set to~$50$. 
+These values were selected to maintain a balance between pixel-level accuracy and perceptual quality, while placing greater emphasis on the reconstruction process governed by \(\mathcal{L}_{\text{L1}}\). 
+It is important to note that a comprehensive investigation of different values for \(\lambda_{\text{SSIM}}\) and \(\lambda_{\text{LPIPS}}\) was not performed.
 
 To further assess the individual contribution of each loss component, an ablation study was conducted. The model was trained under different configurations, including combinations of the individual losses and the full combined objective. Quantitative and qualitative results of this ablation are presented and discussed in Section~\ref{subsec:ablation_loss}. Except for the experiments dedicated to this loss ablation, all other trainings were performed using the full combination of the four loss functions.
 
 \subsection{Training Strategy}
 The network training followed a staged adversarial optimization scheme with alternating updates of the generator and discriminator. At the early stage of training, the generator was warmed up by being trained independently for the first 20~epochs to stabilize its predictions before introducing the discriminator. This step mitigates early training instabilities commonly observed in GAN-based frameworks, which were also encountered during experimentation. After the warm-up period, both networks were jointly optimized in an alternating fashion, where the discriminator was updated once per iteration, followed by a generator update (1:1 ratio between $G$ and $D$). The discriminator was trained to minimize the least-squares error between its predictions and the target real/fake labels, while the generator was optimized to minimize the composite objective described in the previous subsection.
 
-Training was performed for 150~epochs using a batch size of 16 and the Adam optimizer~\cite{adam_optimizer_2017} with a learning rate of $1\times10^{-4}$ and momentum parameters $(\beta_1, \beta_2) = (0.5, 0.999)$. To prevent overfitting and accelerate convergence, the generator’s learning rate was adaptively reduced using the \texttt{ReduceLROnPlateau} scheduler, which halves the rate when the validation $\mathrm{L1}$ loss stagnates. The discriminator’s learning rate was kept constant throughout training to maintain stable adversarial dynamics, as reducing it was found to introduce additional instability during preliminary experiments.
+Training was conducted for 150~epochs using a batch size of~16 and the Adam optimizer~\cite{adam_optimizer_2017} with a learning rate (\(\mathrm{LR}\)) of \(1\times10^{-4}\) and momentum parameters \((\beta_1, \beta_2) = (0.5, 0.999)\). To prevent overfitting and accelerate convergence, the generator’s learning rate was adaptively reduced using the \texttt{ReduceLROnPlateau} scheduler---an adaptive learning rate regulator that decreases the \(\mathrm{LR}\) by a specified factor (\(\mathrm{LR_{factor}}\)) when no improvement is observed in the validation loss over a predefined number of epochs, referred to as \emph{patience}~\cite{trans_breast_cancer_ReduceLROnPlateau}. The adjustment follows the rule 
+\[
+\mathrm{LR_{new}} = \mathrm{LR_{initial}} \times \mathrm{LR_{factor}}
+\]
+as described in~\cite{ReduceLRonPlateau_vs_OneCycleLR}. In this thesis, the learning rate was halved whenever the validation \(\mathrm{L1}\) loss stagnated for 10~epochs. The discriminator’s learning rate was kept constant throughout training to preserve stable adversarial dynamics, as reducing it was found to introduce additional instability during preliminary experiments.
+
 
 \begin{figure}[!htbp]
     \centering

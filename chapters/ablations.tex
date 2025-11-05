@@ -2,7 +2,6 @@
 \label{chapter:ablation}
 \subsection{Effect of Loss Functions}
 \label{subsec:ablation_loss}
-
 To evaluate the contribution of each loss component to the overall model performance, an ablation study was conducted. Four training configurations were compared:
 \begin{enumerate}
     \item $\mathcal{L}_{\text{GAN}} + \mathcal{L}_{\text{L1}}$,
@@ -96,6 +95,7 @@ Similar findings were also reported by~\cite{s2o_ViT_cGAN} and~\cite{CR_RS_GAN_s
 Overall, the results demonstrate the incremental benefit of incorporating perceptual and structural similarity terms alongside the adversarial $\mathcal{L}_{\text{GAN}}$ and $\mathrm{L1}$ objectives. 
 
 \subsection{Effect of Excluding 60 m Bands}
+\label{subsec:ablation_execluding_60m}
 Given the varying data distributions and the originally different spatial resolutions of the Sentinel-2 bands (even though all were resampled to 10m in the dataset), it was hypothesized that including the 60m bands might introduce noise and confuse the model during training. To examine this assumption, an ablation study was conducted using the same training configuration as for the full 13-band model, both trained on 20\% of the winter subset.
 
 Surprisingly, removing the 60m bands did not lead to any improvement. Instead, both SSIM and LPIPS scores decreased, as reported in Table~\ref{tab:ablation_excluding_60m}. This suggests that the 60m bands, which primarily serve for atmospheric correction (e.g., B1, B9, and B10), provide complementary spectral information that contributes to maintaining spectral fidelity during training. It is worth noting, however, that these differences are very small.
@@ -118,8 +118,6 @@ Surprisingly, removing the 60m bands did not lead to any improvement. Instead, b
 \end{table}
 
 Interestingly, while the SAM slightly improved after excluding the 60m bands, this does not necessarily contradict the decline in PSNR and SSIM. The model may have learned to reproduce more spectrally consistent relationships between the remaining bands (hence a smaller spectral angle), yet failed to preserve the absolute reflectance magnitudes and spatial details, leading to lower overall reconstruction quality. This indicates a trade-off between radiometric fidelity and spectral coherence in the absence of the full spectral range. For qualitative evaluation, Figure~\ref{fig:ablation_excluding_60m_qualitative} illustrates the generated optical images obtained from models trained with the full spectral configuration and with the 60m bands excluded.
-
-Similarly, the per-band evaluation (Table~\ref{tab:ablation_excluding_60m_per_band}) confirms this trend. For most bands, SSIM remains stable when all bands are included, indicating consistent structural reconstruction quality. However, PSNR decreases for nearly all bands when the 60m bands are excluded, with the exception of B1, demonstrating that the full spectral configuration better supports radiometric reconstruction. It is very important to state that these changes when keeping and excluding the  
 \begin{figure}[!htbp]
     \centering
     \setlength{\tabcolsep}{2pt} % horizontal padding between columns
@@ -157,6 +155,8 @@ Similarly, the per-band evaluation (Table~\ref{tab:ablation_excluding_60m_per_ba
     \textbf{(d)}~reference cloud-free Sentinel-2 image.}
     \label{fig:ablation_excluding_60m_qualitative}
 \end{figure}
+
+Similarly, the per-band evaluation (Table~\ref{tab:ablation_excluding_60m_per_band}) confirms this trend. For most bands, SSIM remains stable when all bands are included, indicating consistent structural reconstruction quality. However, PSNR decreases for nearly all bands when the 60m bands are excluded, with the exception of B1, demonstrating that the full spectral configuration better supports radiometric reconstruction. It is very important to state that these changes when keeping and excluding the  
 
 \begin{table}[!htbp]
     \centering
