@@ -1,4 +1,4 @@
-\chapter{Methodology}
+\chapter{Methodology \& Data Basis}
 \label{chapter:methodology}
 This chapter outlines the methodological framework adopted for the SAR-to-optical translation task. It details the formulation of the problem as a supervised image-to-image regression, describes the datasets and preprocessing procedures used, and presents the model architectures and training strategies employed. In particular, the Pix2Pix~\cite{pix2pix_2018} conditional generative adversarial network (cGAN) serves as the core model for learning the mapping between Sentinel-1 SAR inputs and Sentinel-2 multispectral optical outputs. The chapter further elaborates on the design of the loss functions, optimization process, and experimental setup used to ensure stable and effective training. Finally, the evaluation metrics are introduced to provide both quantitative and perceptual assessments of the model’s performance, encompassing spatial fidelity, structural consistency, and spectral accuracy.
 \section{Problem Formulation}
@@ -233,7 +233,7 @@ This section describes the complete training pipeline adopted for the proposed S
 All experiments were implemented in Python~3.11, PyTorch~2.4.0, and CUDA~12.4, using the official Pix2Pix implementation\footnote{\url{https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix}}. Training was conducted on an NVIDIA RTX~A5000 GPU with CUDA acceleration. The training, validation, and test sets were derived from the preprocessed SEN12-MS subset described in Section~\ref{subsec:preprocessing}. Each sample consisted of a Sentinel-1 SAR input patch (VV and VH channels) paired with the corresponding Sentinel-2 optical patch comprising 13 spectral bands.
 
 \noindent
-\textbf{Code Availability:} All source code developed for this thesis, including dataset preprocessing, model training, and evaluation scripts, will be made publicly available to support transparency and reproducibility. The implementation is based on the official Pix2Pix framework and has been adapted for multispectral SAR-to-optical image translation. The repository will be hosted at: \url{https://github.com/to_be_added_later}.
+\textbf{Code Availability:} All source code developed for this thesis, including dataset preprocessing, model training, and evaluation scripts, will be made publicly available to support transparency and reproducibility. The implementation is based on the official Pix2Pix framework and has been adapted for multispectral SAR-to-optical image translation. The repository will be hosted at: \url{https://github.com/THDetch/bachelor-thesis}.
 
 \subsection{Loss Functions}
 \label{subsec:losses}

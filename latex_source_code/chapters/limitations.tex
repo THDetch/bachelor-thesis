@@ -60,7 +60,7 @@ Despite the remarkable performance achieved by the proposed model, several limit
     \caption[Model limitation on structureless SAR inputs]{%
     Qualitative examples illustrating the limitation of the SAR-to-optical translation model when the SAR input lacks clear structural information. 
     Columns: 
-    \textbf{(i)}~SAR input (pseudo-RGB), 
+    \textbf{(i)}~SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)}~model-generated optical image, and 
     \textbf{(iii)}~reference cloud-free Sentinel-2 image. 
     }
@@ -145,7 +145,7 @@ From each ROI in the winter subset (47 ROIs), one optical \texttt{.tif} file was
 The statistics are moreover numerically reported in Table~\ref{tab:s2_band_stats}. This uniform clipping of all optical bands to a fixed range such as [0, 10000] disregards the intrinsic spectral variability between bands. Low-range bands become underrepresented, and high-range bands risk saturation, leading to an imbalanced input distribution. This can hinder convergence and degrade the realism of generated optical images. Band-specific normalization based on empirical percentiles could provide a more balanced and physically consistent preprocessing strategy. Although these statistics were computed from only 47 optical samples, the analysis offers valuable insights that can inform and guide future research on this important yet often overlooked aspect in the literature.
 \begin{table}[H]
 \centering
-\caption{Summary statistics of the Sentinel-2 optical bands across the winter subset. Reported are the global minimum and maximum values, and the 1\textsuperscript{st}, 50\textsuperscript{th} (median), and 99\textsuperscript{th} percentiles.}
+\caption[Summary statistics of Sentinel-2 optical bands for the winter subset.]{Summary statistics of the Sentinel-2 optical bands across the winter subset. Reported are the global minimum and maximum values, and the 1\textsuperscript{st}, 50\textsuperscript{th} (median), and 99\textsuperscript{th} percentiles.}
 \label{tab:s2_band_stats}
 \begin{tabular}{lccccc}
 \toprule

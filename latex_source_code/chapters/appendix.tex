@@ -1,6 +1,7 @@
 \chapter{Intermediate Outputs during Training}
 \label{appendix:intermediate_visuals}
 \begin{figure}[!htbp]
+    \captionsetup{list=no}
   \centering
   \renewcommand{\arraystretch}{1.0}
   \adjustbox{max width=\textwidth, max totalheight=0.83\textheight, keepaspectratio}{
@@ -25,7 +26,7 @@
       \includegraphics[width=0.45\linewidth]{img/intermediate_gt_imgs/sample_04_tgt.png} \\
     \end{tabular}
   } % end adjustbox
-  \caption[Intermediate results during training]{Evolution of generated optical images across training epochs for two samples (columns). Rows show pseudo-RGB SAR input (R: VV, G: VH, B: VV7VH), generated optical images after epochs 1, 51, 101, 150, and the ground truth.}
+  \caption[Intermediate results during training]{Evolution of generated optical images across training epochs for two samples (columns). Rows show pseudo-RGB SAR input (R: VV, G: VH, B: VV/VH), generated optical images after epochs 1, 51, 101, 150, and the ground truth.}
   \label{fig:intermediate_training}
 \end{figure}
 
@@ -33,6 +34,8 @@
 \label{appendix:bandwise_results}
 
 \begin{figure}[h!]
+    \captionsetup{list=no}
+
     \centering
     \captionsetup[subfigure]{labelformat=empty}
 
@@ -80,6 +83,7 @@
 \end{figure}
 
 \begin{figure}[p]
+    \captionsetup{list=no}
     \ContinuedFloat
     \centering
     \captionsetup[subfigure]{labelformat=empty}
@@ -137,8 +141,8 @@
 \chapter{Results Across Different Seasons}
 \label{appendix:results_seasons}
 
-% ---------------- FALL ----------------
 \begin{table}[h!]
+\captionsetup{list=no}
 \centering
 \caption[Quantitative results on the fall subset]{Quantitative performance of the model on the fall subset of the SEN12-MS dataset.}
 \begin{tabular}{lcccc}
@@ -151,13 +155,14 @@ Fall & 0.788 & 22.40 & 0.269 & 13.67 \\
 \label{tab:fall_results}
 \end{table}
 
-% \vspace{1em} 
 
 \begin{figure}[h!]
+    \captionsetup{list=no}
     \centering
     \setlength{\tabcolsep}{2pt}
     \renewcommand{\arraystretch}{1.0}
     \begin{tabular}{c *{3}{c}}
+        (i) & (ii) & (iii) \\
         
         \includegraphics[width=0.25\textwidth]{img/seasons/fall/sample_000031_sar_pseudo.png} &
         \includegraphics[width=0.25\textwidth]{img/seasons/fall/sample_000031_pred_rgb.png} &
@@ -174,7 +179,7 @@ Fall & 0.788 & 22.40 & 0.269 & 13.67 \\
     \end{tabular}
     \caption[Qualitative results on the fall subset]{%
     Representative SAR-to-optical translation result on the \textbf{fall} subset from the SEN12-MS dataset. 
-    Columns: \textbf{(i)} SAR input (pseudo-RGB), 
+    Columns: \textbf{(i)} SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)} model-generated optical image, 
     \textbf{(iii)} ground-truth Sentinel-2 image.
     }
@@ -182,11 +187,10 @@ Fall & 0.788 & 22.40 & 0.269 & 13.67 \\
 \end{figure}
 
 \newpage
-% ---------------- SPRING ----------------
-% \section{Spring Subset}
 \vspace{2em} 
 
 \begin{table}[h!]
+\captionsetup{list=no}
 \centering
 \caption[Quantitative results on the spring subset]{Quantitative performance of the model on the spring subset of the SEN12-MS dataset.}
 \begin{tabular}{lcccc}
@@ -202,10 +206,13 @@ Spring & 0.791 & 20.00 & 0.297 & 12.06 \\
 \vspace{2em} 
 
 \begin{figure}[h!]
+    \captionsetup{list=no}
     \centering
     \setlength{\tabcolsep}{2pt}
     \renewcommand{\arraystretch}{1.0}
     \begin{tabular}{c *{3}{c}}
+        (i) & (ii) & (iii) \\
+
         \includegraphics[width=0.25\textwidth]{img/seasons/spring/sample_000011_sar_pseudo.png} &
         \includegraphics[width=0.25\textwidth]{img/seasons/spring/sample_000011_pred_rgb.png} &
         \includegraphics[width=0.25\textwidth]{img/seasons/spring/sample_000011_true_rgb.png} \\
@@ -220,7 +227,7 @@ Spring & 0.791 & 20.00 & 0.297 & 12.06 \\
     \end{tabular}
     \caption[Qualitative results on the spring subset]{%
     Representative SAR-to-optical translation result on the \textbf{spring} subset. 
-    Columns: \textbf{(i)} SAR input (pseudo-RGB), 
+    Columns: \textbf{(i)} SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)} model-generated optical image, 
     \textbf{(iii)} ground-truth Sentinel-2 image.
     }
@@ -228,13 +235,12 @@ Spring & 0.791 & 20.00 & 0.297 & 12.06 \\
 \end{figure}
 
 
-% ---------------- SUMMER ----------------
-% \section{Summer Subset}
 \newpage
 
 \vspace{2em} 
 
 \begin{table}[h!]
+\captionsetup{list=no}
 \centering
 \caption[Quantitative results on the summer subset]{Quantitative performance of the model on the summer subset of the SEN12-MS dataset.}
 \begin{tabular}{lcccc}
@@ -250,10 +256,12 @@ Summer & 0.800 & 22.79 & 0.268 & 12.43 \\
 \vspace{2em} 
 
 \begin{figure}[h!]
+    \captionsetup{list=no}
     \centering
     \setlength{\tabcolsep}{2pt}
     \renewcommand{\arraystretch}{1.0}
     \begin{tabular}{c *{3}{c}}
+        (i) & (ii) & (iii) \\
 
         \includegraphics[width=0.25\textwidth]{img/seasons/summer/sample_000004_sar_pseudo.png} &
         \includegraphics[width=0.25\textwidth]{img/seasons/summer/sample_000004_pred_rgb.png} &
@@ -269,7 +277,7 @@ Summer & 0.800 & 22.79 & 0.268 & 12.43 \\
     \end{tabular}
     \caption[Qualitative results on the summer subset]{%
     Representative SAR-to-optical translation result on the \textbf{summer} subset. 
-    Columns: \textbf{(i)} SAR input (pseudo-RGB), 
+    Columns: \textbf{(i)} SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH), 
     \textbf{(ii)} model-generated optical image, 
     \textbf{(iii)} ground-truth Sentinel-2 image.
     }
@@ -280,6 +288,7 @@ Summer & 0.800 & 22.79 & 0.268 & 12.43 \\
 \label{appendix:data_ranges}
 % ----------------------------------------------------------
 \begin{figure}[!htbp]
+  \captionsetup{list=no}
   \centering
 
   % First histogram
@@ -298,6 +307,7 @@ Summer & 0.800 & 22.79 & 0.268 & 12.43 \\
 \FloatBarrier % ensure next figure pair appears after this one
 
 \begin{figure}[!htbp]
+  \captionsetup{list=no}
   \centering
   % Third histogram
   \adjustbox{max width=0.95\textwidth, max totalheight=0.45\textheight, keepaspectratio}{
