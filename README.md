@@ -7,7 +7,7 @@ This is the repo for my bachelor thesis on the topic of:
 AKA: _SAR-to-Optical image translation_
 
 ***
-**Disclaimer:** Since this thesis contains more than what is illustrated here and was conducted over several months, it is highly recommended to refer to or read the thesis document—or relevant parts depending on your needs—which can be found [here](latex_source_code/main.pdf).
+**Note:** Since this thesis contains more than what is illustrated here and was conducted over several months, it is highly recommended to refer to or read the thesis document—or relevant parts depending on your needs—which can be found [here](latex_source_code/main.pdf).
 
 ## Motivation
 Optical remote sensing data provide rich information used, among other applications, in forest and agricultural monitoring. However, they are inherently constrained by atmospheric conditions such as illumination variability and, in particular, **cloud cover**, which creates temporal gaps in acquisition. 
