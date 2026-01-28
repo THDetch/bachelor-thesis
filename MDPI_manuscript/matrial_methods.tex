@@ -103,7 +103,7 @@ Training followed a staged adversarial optimization scheme. The generator was fi
 Model performance was monitored via quantitative metrics—specifically L1, SSIM, and LPIPS calculated on the validation set after each epoch—and qualitative visual inspections of generated samples every ten epochs. The checkpoint yielding the lowest validation L1 loss was retained as the best-performing model.
 
 
-\section{Evaluation Metrics}
+\subsection{Evaluation Metrics}
 \label{sec:evaluation_metrics}
 The effectiveness of SAR-to-optical image translation depends not only on the choice of translation models but also on the methods employed for quality assessment. As discussed in~\cite{quality_assessment_S2OT}, Image Quality Assessment (IQA) serves two key purposes: (i) to objectively evaluate the quality of results produced by different models, and (ii) to guide the optimization of network architectures and algorithms.
 
@@ -134,35 +134,49 @@ MSE & \cite{CR_RS_spati_atten_GAN, trans_gan_CF} & 2 \\
 \end{tabular}
 \end{table}
 
-\subsection{Metric Definitions}
+\subsubsection{Metric Definitions}
 
-\paragraph{\textbf{SSIM}} The Structural Similarity Index (SSIM)~\cite{iqa_ssim} evaluates perceptual quality by comparing local luminance, contrast, and structure. Unlike pixel differences, it accounts for visual sensitivity to structural distortion:
+\paragraph{\textbf{SSIM}} The Structural Similarity Index (SSIM)~\cite{iqa_ssim} evaluates perceptual quality by comparing local luminance, contrast, and structure, thereby accounting for visual sensitivity to structural distortion:
 \begin{equation}
 \text{SSIM}(x,y) = \frac{(2\mu_x \mu_y + c_1)(2\sigma_{xy} + c_2)}{(\mu_x^2 + \mu_y^2 + c_1)(\sigma_x^2 + \sigma_y^2 + c_2)}
 \end{equation}
+where $\mu_x, \mu_y$ are means, $\sigma_x^2, \sigma_y^2$ are variances, and $\sigma_{xy}$ is the covariance. Values close to 1 indicate strong structural similarity.
 
-\paragraph{\textbf{PSNR}} Peak Signal-to-Noise Ratio (PSNR) measures reconstruction quality via the ratio of maximum signal power to Mean Squared Error (MSE). It is a standard metric for pixel-level fidelity but correlates weakly with human perception~\cite{DiffCR}:
-\begin{equation}
-\text{PSNR}(x,y) = 10 \cdot \log_{10} \left( \frac{MAX^2}{\text{MSE}(x,y)} \right)
-\end{equation}
 
-\paragraph{\textbf{SAM}} Spectral Angle Mapper (SAM)~\cite{iqa_sam} evaluates spectral fidelity by treating pixels as \(n\)-dimensional vectors and measuring the angle between them. It is illumination-invariant, making it ideal for multispectral validation:
+\paragraph{\textbf{PSNR}} 
+The Peak Signal-to-Noise Ratio (PSNR) quantifies reconstruction quality by measuring the ratio of maximum signal power to the Mean Squared Error (MSE). For two images $x$ and $y$, it is defined as
 \begin{equation}
-\text{SAM}(x,y) = \arccos \left( \frac{\langle x, y \rangle}{\|x\|_2 \cdot \|y\|_2} \right)
+\text{PSNR}(x,y) = 10 \cdot \log_{10} \left( \frac{MAX^2}{\text{MSE}(x,y)} \right),
 \end{equation}
+where the MSE is given by
+\begin{equation}
+\text{MSE}(x,y) = \frac{1}{N} \sum_{i=1}^{N} (x_i - y_i)^2.
+\end{equation}
+Here, $x_i$ and $y_i$ denote the pixel values of the generated and reference images, $N$ is the total number of pixels, and $MAX$ represents the maximum pixel intensity (e.g., $255$). While higher PSNR values indicate lower distortion, the metric is limited by its purely pixel-wise formulation and often correlates weakly with human visual perception~\cite{DiffCR}.
 
-\paragraph{\textbf{LPIPS}} Learned Perceptual Image Patch Similarity (LPIPS)~\cite{iqa_lpips} measures distance in deep feature space using a pretrained network. It captures high-level semantic similarity closer to human visual judgment than traditional metrics:
+
+\paragraph{\textbf{SAM}} 
+The Spectral Angle Mapper (SAM)~\cite{iqa_sam} evaluates spectral fidelity by treating the spectrum of each pixel as an \(n\)-dimensional vector and measuring the angle between the generated vector $x$ and the reference vector $y$:
 \begin{equation}
-\text{LPIPS}(x,y) = \sum_{l} w_l \cdot \| f_l(x) - f_l(y) \|_2
+\text{SAM}(x,y) = \arccos \left( \frac{\langle x, y \rangle}{\|x\|_2 \cdot \|y\|_2} \right),
 \end{equation}
-For inputs with $>3$ bands, LPIPS was computed on a representative RGB stack.
+where $\langle \cdot, \cdot \rangle$ denotes the dot product and $\|\cdot\|_2$ is the Euclidean norm. The result is typically expressed in degrees, with smaller values indicating higher spectral similarity. Because SAM considers only vector direction rather than magnitude, it is invariant to illumination changes, making it ideal for multispectral analysis~\cite{S2MS_GAN}.
+
+
+\paragraph{\textbf{LPIPS}} 
+The Learned Perceptual Image Patch Similarity (LPIPS)~\cite{iqa_lpips} measures distance in deep feature space using a pretrained network. It captures high-level semantic similarity closer to human visual judgment than traditional metrics:
+\begin{equation}
+\text{LPIPS}(x,y) = \sum_{l} w_l \cdot \| f_l(x) - f_l(y) \|_2,
+\end{equation}
+where $f_l(\cdot)$ represents the feature activations in layer $l$ and $w_l$ denotes learned weights. Lower values indicate higher perceptual realism. Since standard LPIPS models are trained on 3-channel inputs, we computed the metric using the representative RGB stack of the multispectral images.
 
 \paragraph{\textbf{MAE \& RMSE}} Mean Absolute Error (MAE) and Root Mean Square Error (RMSE) provide direct quantitative assessments of pixel-wise error, with RMSE being more sensitive to outliers:
 \begin{equation}
-\mathrm{MAE} = \frac{1}{N} \sum |y_i - x_i|, \quad \mathrm{RMSE} = \sqrt{\frac{1}{N} \sum (y_i - x_i)^2}
+\mathrm{MAE} = \frac{1}{N} \sum |y_i - x_i|, \quad \mathrm{RMSE} = \sqrt{\frac{1}{N} \sum (y_i - x_i)^2}.
 \end{equation}
+These metrics are calculated using the same pixel-wise notation ($x_i, y_i, N$) defined previously for PSNR/MSE.
 
-A summary of the evaluated aspects, advantages, and limitations of each metric is provided in Table~\ref{tab:evaluation_metrics}.
+A brief summary of the evaluated aspects, advantages, and limitations of each metric is provided in Table~\ref{tab:evaluation_metrics}.
 
 \begin{table}[!htbp]
     \centering
@@ -173,11 +187,11 @@ A summary of the evaluated aspects, advantages, and limitations of each metric i
         \toprule
         \textbf{Metric} & \textbf{Aspect Evaluated} & \textbf{Key Characteristic} \\
         \midrule
-        PSNR  & Pixel-level fidelity & Interpretable, but weakly correlated with perception \\
         SSIM  & Structural similarity & Captures local texture/structure; intensity-based \\
+        PSNR  & Pixel-level fidelity & Interpretable, but weakly correlated with perception \\
         SAM   & Spectral fidelity & Illumination invariant; ignores spatial context \\
-        MAE/RMSE & Reconstruction accuracy & Direct error estimate; sensitive to outliers (RMSE) \\
         LPIPS & Perceptual similarity & Deep feature-based; aligns with human vision \\ 
+        MAE/RMSE & Reconstruction accuracy & Direct error estimate; sensitive to outliers (RMSE) \\
         \bottomrule
     \end{tabularx}
 \end{table}
