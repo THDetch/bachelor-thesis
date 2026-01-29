@@ -11,7 +11,7 @@ We assume access to a paired dataset $\mathcal{D} = \{(x_i, y_i)\}_{i=1}^{M}$ co
 where $\mathcal{L}$ is a weighted combination of reconstruction, adversarial, and perceptual terms designed to collectively encourage pixel-level accuracy, structural consistency, and spectral fidelity. Specific details on the loss components and optimization strategy are provided in Section~\ref{subsec:losses}.
 
 \subsection{Dataset}
-\label{subsec:datasets}
+\label{sec:datasets}
 
 This study utilizes the \textit{SEN12-MS} dataset~\cite{sen12ms_2019}, curated by Schmitt et al. SEN12-MS is a large-scale, globally distributed benchmark explicitly designed to advance research in multimodal Earth observation and deep learning. It comprises 180,662 georeferenced image triplets, each consisting of: (i) dual-polarized Sentinel-1 synthetic aperture radar (SAR) data in VV and VH polarization ($\sigma^{0}$ backscatter values in decibel scale); (ii) full Sentinel-2 multispectral imagery spanning all 13 bands; and (iii) MODIS land cover maps derived from the MCD12Q1 product and resampled to 10 m resolution. Each triplet is stored as a $256 \times 256$ pixel GeoTIFF at 10 m ground sampling distance, corresponding to a spatial coverage of approximately $2.56 \times 2.56$ km per patch. The dataset has a total size of 510 GB, reflecting its high complexity, diversity, and spatial resolution.
 
