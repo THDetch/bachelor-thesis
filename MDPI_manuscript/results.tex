@@ -50,7 +50,7 @@ To quantitatively assess the translation quality, we evaluate the model using st
         \toprule
         \textbf{SSIM} & \textbf{PSNR (dB)} & \textbf{LPIPS} & \textbf{SAM (°)} & \textbf{MAE} & \textbf{RMSE} \\
         \midrule
-        \textbf{0.888}           & \textbf{32.63}                & \textbf{0.173}              & \textbf{4.41}                 & \textbf{140.72}           & \textbf{233.69}            \\
+        0.888           & 32.63                & 0.173              & 4.41                 & 140.72           & 233.69            \\
         \bottomrule
     \end{tabular}
     \label{tab:quantitative_result_translation}
@@ -68,7 +68,7 @@ When comparing reconstruction quality across bands, we focus on the Structural S
 
 \begin{table}[!htbp]
 \centering
-\caption{Per-band quantitative validation results. Each Sentinel-2 band’s central wavelength, spectral designation, and native spatial resolution are listed for reference. Best results are highlighted in \textcolor{green!50!black}{green} and worst in \textcolor{red!70!black}{red}.}
+\caption{Per-band quantitative validation results. Each Sentinel-2 band’s central wavelength, spectral designation, and native spatial resolution are listed for reference. Best results are highlighted in \textcolor{green!50!black}{green} and worst in \textcolor{red!70!black}{red}. Arrows ($\uparrow$ / $\downarrow$) indicate whether higher or lower values denote better performance, respectively.}
 \resizebox{0.9\textwidth}{!}{%
 \begin{tabular}{lcccc}
 \toprule
@@ -155,7 +155,7 @@ For quantitative evaluation, we employ a subset of 2{,}000 samples from the wint
 
 \begin{table}[!htbp]
     \centering
-    \caption[Quantitative results on cloud removal]{Quantitative evaluation on SEN12-MS-CR for cloud removal. Arrows ($\uparrow$ / $\downarrow$) indicate whether higher or lower values denote better performance, respectively.}
+    \caption[Quantitative results on cloud removal against SOTA models]{Quantitative evaluation on SEN12-MS-CR for cloud removal.}
     \begin{tabular}{lcccc}
         \toprule
         \textbf{Model}                & \textbf{SSIM $\uparrow$} & \textbf{PSNR (dB) $\uparrow$} & \textbf{LPIPS $\downarrow$} & \textbf{SAM (°) $\downarrow$} \\
@@ -219,166 +219,7 @@ Qualitative results, presented in Figure~\ref{fig:qualitative_results_cloud_remo
     \label{fig:qualitative_results_cloud_removal}
 \end{figure}
 
-% \begin{figure}[H]
-%     %\isPreprints{}{% This command is only used for ``preprints''.
-%     \begin{adjustwidth}{-\extralength}{0cm}
-%         \centering
-%         \setlength{\tabcolsep}{1pt} % Minimal horizontal space between columns
-%         \renewcommand{\arraystretch}{0.5} % Minimal vertical space between rows
-%         %} % If the paper is ``preprints'', please uncomment this parenthesis.
-
-%         \begin{tabular}{c c c c c}
-%             % ------------------- Header -------------------
-%             & (i) & (ii) & (iii) & (iv) \\
-%             % ------------------- Row 1 -------------------
-%             \textbf{(a)} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000881_sar_pseudo.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000881_cloudy_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000881_pred_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000881_true_rgb.png} \\
-%             % ------------------- Row 2 -------------------
-%             \textbf{(b)} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000683_sar_pseudo.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000683_cloudy_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000683_pred_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000683_true_rgb.png} \\
-%             % ------------------- Row 3 -------------------
-%             \textbf{(c)} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_001114_sar_pseudo.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_001114_cloudy_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_001114_pred_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_001114_true_rgb.png} \\
-%             % ------------------- Row 4 -------------------
-%             \textbf{(d)} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000013_sar_pseudo.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000013_cloudy_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000013_pred_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000013_true_rgb.png} \\
-%             % ------------------- Row 5 -------------------
-%             \textbf{(e)} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000150_sar_pseudo.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000150_cloudy_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000150_pred_rgb.png} &
-%             \includegraphics[width=0.22\linewidth]{../latex_source_code/img/cloud_removal/sample_000150_true_rgb.png} \\
-%         \end{tabular}
-
-%     %\isPreprints{}{% This command is only used for ``preprints''.
-%     \end{adjustwidth}
-%     %} % If the paper is ``preprints'', please uncomment this parenthesis.
-%     \caption[Qualitative results on cloud removal]{%
-%     Qualitative results of the model trained on the full winter subset of the SEN12-MS dataset, evaluated on the complementary SEN12-MS-CR dataset for the \textbf{cloud removal} task.
-%     Columns:
-%     \textbf{(i)}~SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH),
-%     \textbf{(ii)}~reference cloud-contaminated optical image,
-%     \textbf{(iii)}~generated cloud-free optical image, and
-%     \textbf{(iv)}~reference cloud-free optical image (ground truth).}
-%     \label{fig:qualitative_results_cloud_removal}
-% \end{figure}
-
 In summary, both qualitative and quantitative metrics confirm the model’s ability to generate high-quality, cloud-free optical images across all 13 spectral bands. Because the model relies exclusively on SAR input to generate the optical output, the density or presence of clouds in the target area does not influence the reconstruction process, emphasizing the robustness of SAR-to-optical translation in addressing cloud cover.
 
-\subsection{General information}
-\begin{figure}[H]
-%\isPreprints{\centering}{} % Only used for preprints
-\includegraphics[width=4.0 cm]{Definitions/logo-mdpi}
-\caption{This is a figure. Schemes follow the same formatting.\label{fig1}}
-\end{figure}   
-\unskip
-
-\begin{table}[H] 
-%\small % Change table font size
-\caption{This is a table caption. Tables should be placed in the main text near to the first time they are~cited.\label{tab1}}
-%\isPreprints{\centering}{} % Only used for preprints
-\begin{tabularx}{\textwidth}{CCC}
-\toprule
-\textbf{Title 1}	& \textbf{Title 2}	& \textbf{Title 3}\\
-\midrule
-Entry 1		& Data			& Data\\
-Entry 2		& Data			& Data \textsuperscript{1}\\
-\bottomrule
-\end{tabularx}
-
-\noindent{\footnotesize{\textsuperscript{1} Tables may have a footer.}}
-\end{table}
-
-\begin{table}[!htbp]
-\centering
-\caption[Sentinel-2 MSI spectral bands]{Sentinel-2 MSI spectral bands with central wavelength and spatial resolution}
-\label{tab:sentinel2_bands}
-\begin{tabular}{@{}lll@{}}
-\toprule
-\textbf{Band} & \textbf{Central Wavelength [nm]} & \textbf{Resolution [m]} \\ \midrule
-B1  & 443  (Aerosols)                & 60 \\
-B2  & 490  (Blue)                    & 10 \\
-B3  & 560  (Green)                   & 10 \\
-B4  & 665  (Red)                     & 10 \\
-B5  & 705  (Red edge)                & 20 \\
-B6  & 740  (Red edge)                & 20 \\
-B7  & 783  (Red edge)                & 20 \\
-B8  & 842  (NIR)                     & 10 \\
-B8a & 865  (Red edge)                & 20 \\
-B9  & 945  (Water vapour)            & 60 \\
-B10 & 1375 (Cirrus)                  & 60 \\
-B11 & 1610 (SWIR)                    & 20 \\
-B12 & 2190 (SWIR)                    & 20 \\ \bottomrule
-\end{tabular}
-\end{table}
-
-The text continues here (Figure~\ref{fig2} and Table~\ref{tab2}).
-
-% Example of a figure that spans the whole page width and with subfigures. The same concept works for tables, too.
-\begin{figure}[H]
-%\isPreprints{}{% This command is only used for ``preprints''.
-\begin{adjustwidth}{-\extralength}{0cm}
-\centering
-%} % If the paper is ``preprints'', please uncomment this parenthesis.
-\subfloat[\centering]{\includegraphics[width=7.0cm]{Definitions/logo-mdpi}}
-%\hfill
-\subfloat[\centering]{\includegraphics[width=7.0cm]{Definitions/logo-mdpi}}\\
-\subfloat[\centering]{\includegraphics[width=7.0cm]{Definitions/logo-mdpi}}
-%\hfill
-\subfloat[\centering]{\includegraphics[width=7.0cm]{Definitions/logo-mdpi}}
-%\isPreprints{}{% This command is only used for ``preprints''.
-\end{adjustwidth}
-%} % If the paper is ``preprints'', please uncomment this parenthesis.
-\caption{This is a wide figure. Schemes follow the same formatting. If there are multiple panels, they should be listed as: (\textbf{a}) Description of what is contained in the first panel. (\textbf{b}) Description of what is contained in the second panel. (\textbf{c}) Description of what is contained in the third panel. (\textbf{d}) Description of what is contained in the fourth panel. Figures should be placed in the main text near to the first time they are cited. A caption on a single line should be centered.\label{fig2}}
-\end{figure} 
-
-\begin{table}[H]
-\caption{This is a wide table.\label{tab2}}
-%\isPreprints{\centering}{% This command is only used for ``preprints''.
-	\begin{adjustwidth}{-\extralength}{0cm}
-%} % If the paper is ``preprints'', please uncomment this parenthesis.
-%\isPreprints{\begin{tabularx}{\textwidth}{CCCC}}{% This command is only used for ``preprints''.
-		\begin{tabularx}{\fulllength}{CCCC}
-%} % If the paper is ``preprints'', please uncomment this parenthesis.
-			\toprule
-			\textbf{Title 1}	& \textbf{Title 2}	& \textbf{Title 3}     & \textbf{Title 4}\\
-			\midrule
-\multirow[m]{3}{*}{Entry 1 *}	& Data			& Data			& Data\\
-			  	                   & Data			& Data			& Data\\
-			             	      & Data			& Data			& Data\\
-                   \midrule
-\multirow[m]{3}{*}{Entry 2}    & Data			& Data			& Data\\
-			  	                  & Data			& Data			& Data\\
-			             	     & Data			& Data			& Data\\
-			\bottomrule
-		\end{tabularx}
-%		\isPreprints{}{% This command is only used for ``preprints''.
-	\end{adjustwidth}
-%} % If the paper is ``preprints'', please uncomment this parenthesis.
-	\noindent{\footnotesize{* Tables may have a footer.}}
-\end{table}
-
-%\begin{listing}[H]
-%\caption{Title of the listing}
-%\rule{\columnwidth}{1pt}
-%\raggedright Text of the listing. In font size footnotesize, small, or normalsize. Preferred format: left aligned and single spaced. Preferred border format: top border line and bottom border line.
-%\rule{\columnwidth}{1pt}
-%\end{listing}
-
-Text.
-
-Text.
 
 \input{ablations}

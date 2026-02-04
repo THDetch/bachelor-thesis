@@ -1,3 +1,9 @@
 \section{Conclusions}
 
-This section is not mandatory, but can be added to the manuscript if the discussion is unusually long or complex.
+This study explored the potential of SAR-to-optical image translation as a generative framework for synthesizing multispectral optical imagery from radar data, specifically aiming to mitigate the limitations of cloud-contaminated optical remote sensing. Using co-registered Sentinel-1 and Sentinel-2 data from the SEN12-MS dataset, we trained a Pix2Pix conditional generative adversarial network (cGAN) to translate dual-polarized SAR inputs into full-spectrum optical outputs across all 13 Sentinel-2 bands.
+
+Our results confirm that meaningful spectral and spatial correlations exist between the SAR and optical domains, enabling the reliable reconstruction of high-fidelity optical imagery. Reconstruction quality varied across spectral bands, reflecting inherent differences in wavelength sensitivity and signal characteristics. Notably, the model's performance in cloud removal demonstrated that SAR-to-optical translation can effectively generate cloud-free imagery without explicit training for this task, achieving results comparable to or surpassing several state-of-the-art approaches. Furthermore, ablation experiments indicated that combining SSIM and LPIPS losses with the standard GAN objective significantly enhances reconstruction consistency and perceptual realism.
+
+While these findings validate the feasibility of SAR-to-optical translation, certain challenges remain. Model performance tends to decrease in textureless or spectrally complex regions, and temporal generalization is currently limited by training exclusively on winter data. Overall, this work establishes that GAN-based architectures can reconstruct full-spectrum, cloud-free optical imagery from SAR data with competitive accuracy, reinforcing the potential of generative approaches to enhance the temporal continuity of optical remote sensing.
+
+\textcolor{red}{TODO: do not foget to add brief hints on future work!}

@@ -1,0 +1,37 @@
+Thema: genAI und RADAR zu optischen Daten
+
+- diffusion models
+- als input auch meta daten einbeziehen, v.a. Zeit und Ort
+- 60m Bänder auch als input hinzunehmen und dann nur 10m und 20m Bänder erzeugen.
+- statt pixel-by-pixel segment-by-segment mit mehreren optionen:
+	- q-tree
+	- hexagone
+	- super pixel
+	- MRS (??)
+	Grund: noise reduction bzw. bessere signal-to-noise ratio
+	
+- weitere Hypothese: die Arten des Noise in Radar und optischen Daten sind unterschiedlich bzw. ahben unterschiedliche Ursachen:
+  	- bei Radar hat es oftmal viel mit einer diffusen Reflexion an der Erdoberfläche zu tun (z.B. über Wasserflächen, erst recht bei Wellengang) und am Sensorrauschen (Klirrfaktor).
+  	- bei optischen Daten liegt es sowohl an der Atmosphäre (diffuse Himmelsstreuung durch Aerosole etc.), als auch am Sensor-Rauschen selbst (Klirrfaktor).
+  	daher ist es schwer, ein quasi optisches Rauschen aus einem Radar-Rauschen zu erzeugen.
+  	Es wäre daher interessant, welche Möglichkeiten es zur jeweiligen Rausch-Unterdrückung gibt (z.B. Filter vs. Atmosphärenkorrektur) um dann möglichst rauschfreie Daten für das Training zu verwenden.
+
+Weitere Themen zu genAI (ggfs. im Rahmen eines Forschungsprojekts):
+
+- Zeitreihen und multi-temp. Daten:
+	aus existierenden Zeitreiehen (t0 -> t1 -> t2 -> ... -> tn-1) Bilder zu den Zeitpunkten:
+	tn, tn+1, ... erzeugen (Zukunft), aber auch zu den Zeitpunkten t-1, t-2, ..., t-n (Vergangenheit) erzeugen.
+	=> Interessante Fragen rund um Robustheit und Reliability => damit Einschätzung und Bewertung der Modelle möglich
+
+- "Nach-Colorierung" von FE-Daten:
+	ähnlich wie bei der Nach-Colorierung alten Filmmaterials aus S/W Filmen: aus RGB Multi-Spektral-Daten und aus Multi-Spektral-Daten Hyperspektral-Daten erzeugen.
+
+- Objekt-basierte Rekonstruktion:
+	eCognition's Inter-linked-objects-Mechanismus nutzen um korrespondierende Bild-Segmente (z.B. SAR-optisch) miteinander zu verkinken und dann die objekt-weise gelernten Muster für die Rekonstruktion verwenden.
+	=> inwiefern kann damit (sensor-spezifisches) Bildrauschen berücksichtigt werden (s.o.)?
+	Dieser Mechanismus könnte auch für multi-temp. Daten funktionieren.
+	
+- Generierung synthetischer Daten für das Sensor-Design:
+	genAI zur Bilderzeugung mittels (noch) nicht vorhandener Sesnoren -> wie müsste ein für einen bestimmten Zweck optimierter Sensor gestaltet werden?
+	
+	
