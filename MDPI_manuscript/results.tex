@@ -1,6 +1,6 @@
 \section{Results}
 \subsection{SAR-to-Optical Translation}
-We validate the trained model on both qualitative and quantitative metrics to assess its capability for direct SAR-to-optical image translation. Unlike most prior work that generates only 3–4 RGB bands, the trained Pix2Pix model produces all 13 Sentinel-2 spectral bands.
+We validate the trained model on both qualitative and quantitative metrics to assess its capability for direct SAR-to-optical image translation. Unlike most prior work that generates only 3–4 optical bands, the trained Pix2Pix model produces all 13 Sentinel-2 spectral bands.
 
 Figure~\ref{fig:qualitative_results_translation} presents some representative examples demonstrating the model's performance on diverse geographic and terrain conditions. In row (a), the model achieves strong color fidelity and accurately reconstructs spectral characteristics of vegetation and water bodies. Row (b) shows an urban scene where the model successfully delineates the city layout and captures the river traversing the area, preserving fine structural details. Row (c) demonstrates the model's ability to capture topographic features and surface relief variation from SAR backscatter intensity. Finally, row (d) depicts a coastal scene, where the model accurately reconstructs the land--water boundary and shoreline geometry while producing a plausible optical appearance. Across all examples, the generated optical images exhibit minimal artifacts and maintain structural consistency with ground truth.
 
@@ -36,11 +36,12 @@ Figure~\ref{fig:qualitative_results_translation} presents some representative ex
     Qualitative results on SAR-to-Optical Translation.
     Columns: \textbf{(i)}~SAR input (pseudo-RGB; R: VV, G: VH, B: VV/VH),
     \textbf{(ii)}~generated optical image, and
-    \textbf{(iii)}~ground-truth Sentinel-2 image. All optical images are depicted in RGB (B4, B4, B2) batch.}
+    \textbf{(iii)}~ground-truth Sentinel-2 image. For visualization purposes, all optical images are depicted in RGB (B4, B3, B2) batch.}
     \label{fig:qualitative_results_translation}
 \end{figure}
 
-To quantitatively assess the translation quality, we evaluate the model using standard image fidelity and spectral metrics (Table~\ref{tab:quantitative_result_translation}). The model achieves SSIM of 0.888 and PSNR of 32.63 dB across all 13 spectral bands, with excellent spectral angle mapper (SAM) of 4.41°, indicating strong preservation of spectral characteristics. These metrics are within the range reported for recent SAR-to-optical translation methods. Detailed quantitative comparison with state-of-the-art cloud removal methods is provided in Section~\ref{sec:cloud_removal}. \textcolor{red}{TODO: add references}
+To quantitatively assess the translation quality, we evaluate the model using standard image fidelity and spectral metrics (Table~\ref{tab:quantitative_result_translation}). The model achieves SSIM of 0.888 and PSNR of 32.63 dB across all 13 spectral bands, with excellent spectral angle mapper (SAM) of 4.41°, indicating strong preservation of spectral characteristics. These metrics are within the range reported for recent SAR-to-optical translation methods. Detailed quantitative comparison with state-of-the-art cloud removal methods is provided in Section~\ref{sec:cloud_removal}. 
+% \textcolor{red}{TODO: add references}
 
 
 \begin{table}[!htbp]
@@ -61,7 +62,7 @@ These results demonstrate that the model effectively reconstructs full-spectrum 
 
 % \subsection{Across-Band Translation}
 \subsection{Results Across Individual Optical Bands}
-Another objective of this work was to assess the model’s ability to reliably reconstruct each optical band individually and to evaluate the uniformity of its accuracy across the spectrum. For this purpose, the model trained on the full winter subset was evaluated separately for all 13 Sentinel-2 bands. The results are summarized in Table~\ref{tab:per_band_validation}.
+Another objective of this work was to assess the model’s ability to reliably reconstruct each optical band individually and to evaluate the uniformity of its accuracy across the spectrum. For this purpose, the trained model was evaluated separately for all 13 Sentinel-2 bands. The results are summarized in Table~\ref{tab:per_band_validation}.
 
 When comparing reconstruction quality across bands, we focus on the Structural Similarity Index (SSIM). Unlike MAE or RMSE, which depend on the absolute magnitude and dynamic range of reflectance values (varying significantly between spectral bands), SSIM measures structural similarity based on local intensity patterns. While not entirely invariant to scale, SSIM provides a more robust and interpretable basis for cross-band comparison in this context.
 
@@ -163,7 +164,7 @@ For quantitative evaluation, we employ a subset of 2{,}000 samples from the wint
         DSen2-CR~\cite{CR_SEN2_dRNN}  & 0.878                    & --                            & --                          & 8.07                          \\
         FAT~\cite{c_guided_fus_s2ot}  & 0.880                    & 31.85                         & --                          & 4.19                          \\
         DiffCR~\cite{DiffCR}          & \textbf{0.902}           & 31.77                         & --                          & 5.82                          \\
-        Pix2Pix (This Thesis)         & 0.899                    & \textbf{33.65}                & \textbf{0.152}              & \textbf{3.86}                 \\
+        Pix2Pix (This Study)         & 0.899                    & \textbf{33.65}                & \textbf{0.152}              & \textbf{3.86}                 \\
         \bottomrule
     \end{tabular}
     \label{tab:quantitative_result_cr}

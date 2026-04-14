@@ -1,32 +1,37 @@
 \section[\appendixname~\thesection]{Bandwise Grayscale Reconstructions}
 \label{appendix:bandwise_results}
-% \startlandscape
-\begin{figure}[p]
-\captionsetup{list=no}
+
+\begin{figure}[H]
+\begin{adjustwidth}{-\extralength}{0cm}
 \centering
-\setlength{\tabcolsep}{5pt}      % whitespace between panels
-\renewcommand{\arraystretch}{1.15}
 
-\begin{tabular}{@{}cc@{}} % removes outer padding
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B01_panel.png} &
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B02_panel.png} \\
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B03_panel.png} &
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B04_panel.png} \\
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B05_panel.png} &
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B06_panel.png} \\
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B07_panel.png} &
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B08_panel.png} \\
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B09_panel.png} &
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B10_panel.png} \\
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B11_panel.png} &
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B12_panel.png} \\
-\includegraphics[width=0.45\linewidth]{../latex_source_code/img/bands_gray/sample_000008_B13_panel.png} 
-\end{tabular}
+\subfloat[\centering Band 1]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B01_panel.png}}
+\hfill
+\subfloat[\centering Band 2]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B02_panel.png}}
+\hfill
+\subfloat[\centering Band 3]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B03_panel.png}}\\
 
-\caption[Bandwise grayscale reconstructions]{Bandwise grayscale reconstructions for all Sentinel-2 bands. Row-wise: B1, B2, ..., B12 (generated left, ground truth right).}
-\label{fig:appendix_band_panels_all}
-\end{figure}
-% \finishlandscape
+\subfloat[\centering Band 4]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B04_panel.png}}
+\hfill
+\subfloat[\centering Band 5]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B05_panel.png}}
+\hfill
+\subfloat[\centering Band 6]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B06_panel.png}}\\
 
-\section[\appendixname~\thesection]{}
-All appendix sections must be cited in the main text. In the appendices, Figures, Tables, etc. should be labeled, starting with ``A''---e.g., Figure A1, Figure A2, etc.
+\subfloat[\centering Band 7]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B07_panel.png}}
+\hfill
+\subfloat[\centering Band 8]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B08_panel.png}}
+\hfill
+\subfloat[\centering Band 8A]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B09_panel.png}}\\
+
+\subfloat[\centering Band 9]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B10_panel.png}}
+\hfill
+\subfloat[\centering Band 10]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B11_panel.png}}
+\hfill
+\subfloat[\centering Band 11]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B12_panel.png}}\\
+
+\subfloat[\centering Band 12]{\includegraphics[width=6.0cm]{../latex_source_code/img/bands_gray/sample_000008_B13_panel.png}}
+
+\end{adjustwidth}
+\caption{Bandwise grayscale reconstructions for all Sentinel-2 bands. For all bands: generated left, ground truth right.\label{appendix_fig}}
+\end{figure} 
+

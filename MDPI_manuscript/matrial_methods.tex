@@ -1,6 +1,6 @@
 \section{Materials and Methods}
 \subsection{Problem Formulation}
-The task of SAR-to-optical translation is formulated as a supervised image-to-image translation problem. Let $\mathcal{X} \subset \mathbb{R}^{H \times W \times C_{in}}$ denote the domain of SAR inputs, where $C_{in}=2$ corresponds to the dual-polarized Sentinel-1 channels (VV, VH) expressed in the decibel (dB) scale. Similarly, let $\mathcal{Y} \subset \mathbb{R}^{H \times W \times C_{out}}$ denote the domain of optical reference images, where $C_{out}=13$ represents the full multispectral stack of Sentinel-2.
+The task of SAR-to-optical translation is formulated as a supervised image-to-image translation problem. Let $\mathcal{X} \subset \mathbb{R}^{H \times W \times C_{in}}$ denote the domain of SAR inputs, where $H$ and $W$ represent the height and width of the image patches in pixels, and $C_{in}=2$ corresponds to the dual-polarized Sentinel-1 channels (VV, VH) expressed in the decibel (dB) scale. Similarly, let $\mathcal{Y} \subset \mathbb{R}^{H \times W \times C_{out}}$ denote the domain of optical reference images, where $C_{out}=13$ represents the full multispectral stack of Sentinel-2. 
 
 The objective is to learn a parametric mapping function $G_{\theta}: \mathcal{X} \rightarrow \mathcal{Y}$, parameterized by $\theta$, such that for a given SAR input $x \in \mathcal{X}$, the generated optical image $\hat{y} = G_{\theta}(x)$ is indistinguishable from the ground truth optical image $y \in \mathcal{Y}$ in terms of spectral and spatial characteristics.
 
@@ -8,16 +8,12 @@ We assume access to a paired dataset $\mathcal{D} = \{(x_i, y_i)\}_{i=1}^{M}$ co
 \begin{equation}
     \theta^* = \arg\min_{\theta} \mathbb{E}_{(x,y) \sim \mathcal{D}} [\mathcal{L}(G_{\theta}(x), y)]
 \end{equation}
-where $\mathcal{L}$ is a weighted combination of reconstruction, adversarial, and perceptual terms designed to collectively encourage pixel-level accuracy, structural consistency, and spectral fidelity. Specific details on the loss components and optimization strategy are provided in Section~\ref{subsec:losses}.
+where $\mathcal{L}$ is a weighted combination of reconstruction, adversarial, and perceptual losses designed to collectively encourage pixel-level accuracy, structural consistency, and spectral fidelity. Specific details on the loss components and optimization strategy are provided in Section~\ref{subsec:losses}.
 
 \subsection{Dataset}
 \label{sec:datasets}
 
-This study utilizes the \textit{SEN12-MS} dataset~\cite{sen12ms_2019}, curated by Schmitt et al. SEN12-MS is a large-scale, globally distributed benchmark explicitly designed to advance research in multimodal Earth observation and deep learning. It comprises 180,662 georeferenced image triplets, each consisting of: (i) dual-polarized Sentinel-1 synthetic aperture radar (SAR) data in VV and VH polarization ($\sigma^{0}$ backscatter values in decibel scale); (ii) full Sentinel-2 multispectral imagery spanning all 13 bands; and (iii) MODIS land cover maps derived from the MCD12Q1 product and resampled to 10 m resolution. Each triplet is stored as a $256 \times 256$ pixel GeoTIFF at 10 m ground sampling distance, corresponding to a spatial coverage of approximately $2.56 \times 2.56$ km per patch. The dataset has a total size of 510 GB, reflecting its high complexity, diversity, and spatial resolution.
-
-The Sentinel-1 component originates from ground-range-detected (GRD) products acquired in interferometric wide swath (IW) mode. The Sentinel-2 imagery was curated using a cloud-free mosaicking workflow on Google Earth Engine, ensuring that each region of interest (ROI) is represented by seasonally consistent, nearly cloud-free multispectral data. Importantly, all triplets underwent manual verification by remote sensing experts to ensure freedom from major artifacts, severe registration errors, or residual cloud contamination.
-
-The ROIs were sampled globally across all inhabited continents and four meteorological seasons of 2017 to maximize spatial and temporal diversity. For the purpose of SAR-to-optical translation, only the Sentinel-1 and Sentinel-2 modalities are utilized; the MODIS component is excluded. Sample data are depicted in Figure~\ref{fig:sen12ms_pairs}.
+This study utilizes the \textit{SEN12-MS} dataset~\cite{sen12ms_2019}, curated by Schmitt et al. SEN12-MS is a large-scale, globally distributed benchmark explicitly designed to advance research in multimodal Earth observation and deep learning. It comprises 180,662 georeferenced image triplets, each consisting of: (i) dual-polarized Sentinel-1 synthetic aperture radar (SAR) data in VV and VH polarization ($\sigma^{0}$ backscatter values in decibel scale); (ii) full Sentinel-2 multispectral imagery spanning all 13 bands; and (iii) MODIS land cover maps derived from the MCD12Q1 product and resampled to 10 m resolution. Each triplet is stored as a $256 \times 256$ pixel GeoTIFF at 10 m ground sampling distance, corresponding to a spatial coverage of approximately $2.56 \times 2.56$ km per patch. The dataset has a total size of 510 GB, reflecting its high complexity, diversity, and spatial resolution. For the purpose of SAR-to-optical translation, only the Sentinel-1 and Sentinel-2 modalities are utilized; the MODIS component is excluded. Sample data are depicted in Figure~\ref{fig:sen12ms_pairs}.
 
 \begin{figure}[H]
     \centering
@@ -53,13 +49,18 @@ The ROIs were sampled globally across all inhabited continents and four meteorol
     \label{fig:sen12ms_pairs}
 \end{figure}
 
+The Sentinel-1 component originates from ground-range-detected (GRD) products acquired in interferometric wide swath (IW) mode. The Sentinel-2 imagery was curated using a cloud-free mosaicking workflow on Google Earth Engine, ensuring that each region of interest (ROI) is represented by seasonally consistent, nearly cloud-free multispectral data. Importantly, all triplets underwent manual verification by remote sensing experts to ensure freedom from major artifacts, severe registration errors, or residual cloud contamination.
+
+The ROIs were sampled globally across all inhabited continents and all four seasons of 2017 to maximize spatial and temporal diversity. 
+
+
 SEN12-MS is part of a broader family of datasets developed to foster multimodal remote sensing research. Its predecessor, SEN1-2~\cite{sen12_2018}, provided SAR–optical pairs but lacked georeferencing, full spectral coverage, and dual-polarization SAR. SEN12-MS addressed these limitations, establishing a comprehensive multimodal benchmark. The family has since been extended by SEN12-MS-CR~\cite{sen12ms-cr_2021} (adding cloudy/cloud-free pairs) and SEN12-MS-CR-TS~\cite{sen12ms-cr-ts_2022} (multimodal time series). This study focuses on SEN12-MS to leverage its global diversity for learning the core SAR-to-optical translation mapping.
 
 \subsubsection{Subset Selection and Preprocessing}
 \label{subsec:preprocessing}
-The SEN12-MS dataset is divided into four seasonal subsets. Due to the computational demands of extensive experimentation and ablation studies, the \textit{Winter} subset (containing 31,825 paired images) was selected for training and evaluation.
+The SEN12-MS dataset is divided into four seasonal subsets. Due to the computational demands of extensive experimentation and ablation studies, the \textit{Winter} subset—being the smallest of the four and containing 31,825 paired images—was selected for training and evaluation.
 
-A custom preprocessing pipeline was implemented to standardize the input domains. Following established best practices in the literature~\cite{CR_SEN2_dRNN, c_guided_fus_s2ot, trans_gan_CF, strgb_lat_diff, transfusion_cr}, Sentinel-1 backscatter values were clipped to fixed physical ranges of $[-25, 0]$ dB for VV polarization and $[-32.5, 0]$ dB for VH polarization to suppress radiometric outliers. Similarly, Sentinel-2 top-of-atmosphere (TOA) reflectance values were clipped to the range $[0, 10,000]$. After clipping, all values were linearly normalized to the interval $[-1, 1]$ to align with the Tanh activation function of the generator's output layer. The original spatial resolution of $256 \times 256$ pixels was preserved, and no data augmentation was applied given the inherent global diversity of the dataset.
+A custom preprocessing pipeline was implemented to standardize the input domains. Following established best practices in the literature~\cite{CR_SEN2_dRNN, c_guided_fus_s2ot, trans_gan_CF, strgb_lat_diff, transfusion_cr}, Sentinel-1 backscatter values were clipped to fixed physical ranges of $[-25, 0]$ dB for VV polarization and $[-32.5, 0]$ dB for VH polarization to suppress radiometric outliers. Similarly, Sentinel-2 top-of-atmosphere (TOA) reflectance values were clipped to the range $[0, 10,000]$. After clipping, all values were linearly normalized to the interval $[-1, 1]$ to align with the Tanh activation function of the generator's output layer. The original image size of $256 \times 256$ pixels was preserved, and no data augmentation was applied given the inherent global diversity of the dataset.
 
 \subsection{Network Architecture}
 To address the SAR-to-optical translation task, we employ the Pix2Pix model, a cGAN originally introduced by Isola et al.~\cite{pix2pix_2018}. The Pix2Pix framework has gained substantial recognition not only in general image-to-image translation~\cite{S2MS_GAN}, but also within the domain of SAR-to-optical translation. It is frequently employed as a baseline model as in~\cite{s2opt_LULC, assessing_MT_cGANS_s2o_crop, CR_SEN2_dRNN, cr_fuse_HR_GEN, hvt_cgan, trans_gan_CF}, or further adapted and extended in various studies~\cite{A_cGAN_fuse_sar_MS_CR, s2opt_LULC}. Owing to its demonstrated effectiveness and widespread adoption in related research, Pix2Pix was selected as the primary model for the experiments conducted in this work.
@@ -140,7 +141,7 @@ MSE & \cite{CR_RS_spati_atten_GAN, trans_gan_CF} & 2 \\
 \begin{equation}
 \text{SSIM}(x,y) = \frac{(2\mu_x \mu_y + c_1)(2\sigma_{xy} + c_2)}{(\mu_x^2 + \mu_y^2 + c_1)(\sigma_x^2 + \sigma_y^2 + c_2)}
 \end{equation}
-where $\mu_x, \mu_y$ are means, $\sigma_x^2, \sigma_y^2$ are variances, and $\sigma_{xy}$ is the covariance. Values close to 1 indicate strong structural similarity.
+where $\mu_x, \mu_y$ are means, $\sigma_x^2, \sigma_y^2$ are variances, and $\sigma_{xy}$ is the covariance of the pixel intensities computed over corresponding small image patches (typically using an 11$\times$11 sliding window). Values close to 1 indicate strong structural similarity.
 
 
 \paragraph{\textbf{PSNR}} 
