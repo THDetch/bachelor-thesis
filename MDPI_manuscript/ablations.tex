@@ -45,26 +45,26 @@ The full combination of losses achieves the optimal trade-off. It maintains comp
     % Grid: 6 columns, responsive width
     \begin{tabular}{cccccc}
         \scriptsize (a) SAR & \scriptsize (b) Base & \scriptsize (c) +SSIM & \scriptsize (d) +LPIPS & \scriptsize (e) Full & \scriptsize (f) GT \\
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_1/sar.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_1/none.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_1/ssim.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_1/lpips.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_1/all.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_1/gt.png} \\
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_1/sar.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_1/none.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_1/ssim.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_1/lpips.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_1/all.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_1/gt.png} \\
         
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_2/sar.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_2/none.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_2/ssim.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_2/lpips.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_2/all.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_2/gt.png} \\
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_2/sar.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_2/none.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_2/ssim.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_2/lpips.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_2/all.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_2/gt.png} \\
         
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_3/sar.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_3/none.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_3/ssim.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_3/lpips.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_3/all.png} &
-        \includegraphics[width=0.16\columnwidth]{../latex_source_code/img/ablation/sample_3/gt.png} \\
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_3/sar.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_3/none.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_3/ssim.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_3/lpips.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_3/all.png} &
+        \includegraphics[width=0.16\columnwidth]{img/ablation/sample_3/gt.png} \\
     \end{tabular}
     \caption{Visual comparison of loss configurations. (a) Input SAR, (b) Baseline ($\mathcal{L}_{\text{GAN}}{+}\mathcal{L}_{\text{L1}}$), (c) Baseline w/ SSIM, (d) Baseline w/ LPIPS, (e) Proposed full loss, (f) Ground Truth.}
     \label{fig:ablation_samples}
@@ -96,20 +96,20 @@ Contrary to this hypothesis, excluding the 60\,m bands did not improve performan
     \renewcommand{\arraystretch}{0.5}
     \begin{tabular}{cccc}
         \scriptsize (a) SAR & \scriptsize (b) No 60m & \scriptsize (c) Full (13 Bands) & \scriptsize (d) GT \\
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000034_sar_pseudo.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000034_pred_rgb.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands13/sample_000034_pred_rgb.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000034_true_rgb.png} \\
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000034_sar_pseudo.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000034_pred_rgb.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands13/sample_000034_pred_rgb.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000034_true_rgb.png} \\
         
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000050_sar_pseudo.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000050_pred_rgb.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands13/sample_000050_pred_rgb.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000050_true_rgb.png} \\
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000050_sar_pseudo.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000050_pred_rgb.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands13/sample_000050_pred_rgb.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000050_true_rgb.png} \\
         
-         \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000010_sar_pseudo.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000010_pred_rgb.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands13/sample_000010_pred_rgb.png} &
-        \includegraphics[width=0.23\columnwidth]{../latex_source_code/img/exclusion_60_m/bands10/sample_000010_true_rgb.png} \\
+         \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000010_sar_pseudo.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000010_pred_rgb.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands13/sample_000010_pred_rgb.png} &
+        \includegraphics[width=0.23\columnwidth]{img/exclusion_60_m/bands10/sample_000010_true_rgb.png} \\
     \end{tabular}
     \caption{Qualitative results comparing models trained with and without the 60\,m bands. (a) SAR input, (b) 10-band model output, (c) 13-band model output, (d) Ground Truth.}
     \label{fig:ablation_excluding_60m_qualitative}
