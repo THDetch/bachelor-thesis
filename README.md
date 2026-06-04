@@ -1,3 +1,6 @@
+**Note:** This work is being prepared for publication; see [MDPI_manuscript/main.pdf](https://github.com/THDetch/bachelor-thesis/blob/paper/MDPI_manuscript/main.pdf)
+
+***
 ***
 Hi there!
 This is the repo for my bachelor thesis on the topic of:
