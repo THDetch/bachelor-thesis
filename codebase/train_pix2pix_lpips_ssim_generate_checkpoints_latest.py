@@ -1,0 +1,1123 @@
+# The main training script.
+# pix2pix -> model trained
+# lpips and ssim -> optional losses incorporated during training
+# generate -> monitor samples are saved periodically
+# checkpoints -> last checkpoint + best checkpoints for multiple validation metrics
+#
+# Modified version:
+# 1) Generator-only warmup for 10 epochs
+# 2) G and D start with the same LR and decay together, with option to disable decay
+# 3) Detailed logging/plotting of G/D losses and validation metrics
+# 4) No early stopping; training always continues to the final epoch
+# 5) Dataset split is unchanged; this script only consumes the prepared .npy files
+# 6) Saves best models by Val L1, Val SSIM, Val LPIPS, and weighted validation total
+
+import os
+import sys
+import time
+import json
+import csv
+import logging
+from pathlib import Path
+
+import torch
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from tqdm import tqdm
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from myutils import get_train_val_loaders, save_monitor_samples
+
+
+# -----------------------------------------------------------------------------
+# Device setup
+# -----------------------------------------------------------------------------
+gpu_id = 0
+
+if torch.cuda.is_available():
+    torch.cuda.set_device(gpu_id)
+    device = torch.device(f"cuda:{gpu_id}")
+    print(
+        f"Using device: {torch.cuda.get_device_name(gpu_id)} "
+        f"(id {torch.cuda.current_device()})"
+    )
+else:
+    device = torch.device("cpu")
+    print("Using device: CPU")
+
+torch.backends.cudnn.benchmark = True  # faster on fixed-size tensors
+
+
+# -----------------------------------------------------------------------------
+# Data / Experiment config
+# -----------------------------------------------------------------------------
+input_channel_select = None  # 0, 1, or None for all S1 channels
+
+epochs = 100
+batch_size = 16
+
+# G and D start with the same LR.
+# lr = 1e-4
+
+# Separate learning rates
+lr_G = 1e-4
+lr_D = 1e-4
+# lr_D = 2.5e-5  # D uses half of G learning rate
+
+# Scheduler / LR decay configuration
+use_lr_decay = True          # Set False to train without any LR decay
+lr_decay_patience = 10       # Plateau patience for both G and D
+lr_decay_factor = 0.5
+lr_min = 1e-6
+decay_after_warmup_only = True  # Avoid decaying D before it even starts training
+decay_starting_epoch = 20
+# If you resume from an old checkpoint and want to force both optimizers to a new LR,
+# set this to a float, e.g. 5e-5. Leave as None for normal checkpoint resume.
+set_lrs_on_resume  = None
+
+data_dir = "dataset_all_seasons"
+
+model_name = "pix2pix"
+save_dir = f"trained_all_seasons_debugged_loss_original_label_smoothing/{model_name}"
+
+
+# -----------------------------------------------------------------------------
+# Warmup and update ratio
+# -----------------------------------------------------------------------------
+warmup_g_only_epochs = 0  # train only G for first 10 epochs
+g_steps_per_iter = 1       # after warmup: G updates per batch
+d_steps_per_iter = 1       # after warmup: D updates per batch
+
+
+# -----------------------------------------------------------------------------
+# Optional perceptual losses
+# -----------------------------------------------------------------------------
+use_ssim = False
+use_lpips = False
+
+# lambda_GAN = 5.0
+# lambda_L1 = 50.0
+# lambda_ssim = 10.0
+# lambda_lpips = 10.0
+
+lambda_GAN = 1.0
+lambda_L1 = 100.0
+lambda_ssim = 10.0
+lambda_lpips = 10.0
+
+# If tensors are in [-1,1], SSIM data_range should be 2.0.
+ssim_data_range = 2.0
+
+# LPIPS needs 3 channels. For Sentinel-2: RGB usually B4, B3, B2.
+# Your band indices are zero-based into the 13-band S2 tensor.
+rgb_indices = (3, 2, 1)
+
+
+# -----------------------------------------------------------------------------
+# Best checkpoint behavior
+# -----------------------------------------------------------------------------
+save_best_by_val_l1 = True
+save_best_by_val_ssim = True
+save_best_by_val_lpips = True
+save_best_by_val_total = True
+
+# Which validation metric drives the LR scheduler.
+# Options: "val_l1" or "val_total"
+scheduler_metric = "val_l1"
+
+
+# -----------------------------------------------------------------------------
+# Add pix2pix project to the Python path
+# -----------------------------------------------------------------------------
+gan_repo_path = Path(__file__).parent / "mymodels/pytorch-CycleGAN-and-pix2pix"
+
+if gan_repo_path.is_dir():
+    sys.path.insert(0, str(gan_repo_path))
+else:
+    print(f"pytorch-CycleGAN-and-pix2pix repository not found at {gan_repo_path}")
+    sys.exit(1)
+
+
+# -----------------------------------------------------------------------------
+# Data loading
+# -----------------------------------------------------------------------------
+print("Loading data")
+
+train_loader, val_loader = get_train_val_loaders(
+    train_data_folder=data_dir,
+    val_data_folder=data_dir,
+    batch_size=batch_size,
+    channel_select=input_channel_select,
+)
+
+monitor_batch_X, monitor_batch_y = next(iter(val_loader))
+monitor_batch_X = monitor_batch_X[:8].cpu()
+monitor_batch_y = monitor_batch_y[:8].cpu()
+
+samples_dir = os.path.join(save_dir, "samples")
+os.makedirs(samples_dir, exist_ok=True)
+
+# Probe shapes using a single batch
+first_batch = next(iter(train_loader))
+data_shape_sar = first_batch[0].shape  # (N, H, W, C_in)
+data_shape_opt = first_batch[1].shape  # (N, H, W, C_out)
+
+print(f"SAR data shape from loader: {data_shape_sar}")
+
+height, width, channels_in = data_shape_sar[1], data_shape_sar[2], data_shape_sar[3]
+channels_out = data_shape_opt[3]
+
+print(f"Dimensions: {height}x{width}")
+print(f"Input channels: {channels_in}")
+print(f"Output channels: {channels_out}")
+
+
+from mymodels.cp2pwrapper import Pix2PixWrapper
+from models.networks import define_D, GANLoss
+
+
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
+netG = Pix2PixWrapper(
+    in_channels=channels_in,
+    out_channels=channels_out,
+    img_size=height,
+    norm = "instance"
+).to(device)
+
+netD = define_D(
+    input_nc=channels_in + channels_out,
+    ndf=64,
+    netD="basic",
+    norm = "instance",
+).to(device)
+
+
+# -----------------------------------------------------------------------------
+# Losses
+# -----------------------------------------------------------------------------
+# def __init__(self, gan_mode, target_real_label=1.0, target_fake_label=0.0):
+
+criterionGAN = GANLoss(gan_mode="lsgan", target_real_label=0.9, target_fake_label=0.0).to(device)
+criterionL1 = torch.nn.L1Loss()
+
+ssim = None
+lpips_fn = None
+
+if use_ssim:
+    try:
+        from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+        ssim = StructuralSimilarityIndexMeasure(data_range=ssim_data_range).to(device)
+    except Exception as e:
+        print(f"[WARN] SSIM disabled (import/init failed): {e}")
+        use_ssim = False
+
+if use_lpips:
+    try:
+        import lpips
+        lpips_fn = lpips.LPIPS(net="vgg").to(device)
+    except Exception as e:
+        print(f"[WARN] LPIPS disabled (import/init failed): {e}")
+        use_lpips = False
+
+
+# -----------------------------------------------------------------------------
+# Optimizers / Schedulers
+# -----------------------------------------------------------------------------
+optimizer_G = torch.optim.Adam(netG.parameters(), lr=lr_G, betas=(0.5, 0.999))
+optimizer_D = torch.optim.Adam(netD.parameters(), lr=lr_D, betas=(0.5, 0.999))
+
+scheduler_G = None
+scheduler_D = None
+
+if use_lr_decay:
+    scheduler_G = ReduceLROnPlateau(
+        optimizer_G,
+        mode="min",
+        patience=lr_decay_patience,
+        factor=lr_decay_factor,
+        min_lr=lr_min,
+    )
+
+    scheduler_D = ReduceLROnPlateau(
+        optimizer_D,
+        mode="min",
+        patience=lr_decay_patience,
+        factor=lr_decay_factor,
+        min_lr=lr_min,
+    )
+
+
+param_count_G = sum(p.numel() for p in netG.parameters() if p.requires_grad)
+param_count_D = sum(p.numel() for p in netD.parameters() if p.requires_grad)
+
+print(f"Generator parameter count: {param_count_G:,}")
+print(f"Discriminator parameter count: {param_count_D:,}")
+
+
+# -----------------------------------------------------------------------------
+# Logging / Saving
+# -----------------------------------------------------------------------------
+os.makedirs(save_dir, exist_ok=True)
+
+log_file = os.path.join(save_dir, f"{model_name}_training.log")
+
+logging.basicConfig(
+    filename=log_file,
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger()
+
+config = {
+    "epochs": epochs,
+    "batch_size": batch_size,
+    "lr_initial_G": lr_G,
+    "lr_initial_D": lr_D,
+    "use_lr_decay": use_lr_decay,
+    "lr_decay_patience": lr_decay_patience,
+    "lr_decay_factor": lr_decay_factor,
+    "lr_min": lr_min,
+    "decay_after_warmup_only": decay_after_warmup_only,
+    "scheduler_metric": scheduler_metric,
+    "data_dir": data_dir,
+    "model_name": model_name,
+    "save_dir": save_dir,
+    "warmup_g_only_epochs": warmup_g_only_epochs,
+    "param_count_G": param_count_G,
+    "param_count_D": param_count_D,
+    "g_steps_per_iter": g_steps_per_iter,
+    "d_steps_per_iter": d_steps_per_iter,
+    "use_ssim": use_ssim,
+    "use_lpips": use_lpips,
+    "lambda_GAN": lambda_GAN,
+    "lambda_L1": lambda_L1,
+    "lambda_ssim": lambda_ssim,
+    "lambda_lpips": lambda_lpips,
+    "ssim_data_range": ssim_data_range,
+    "rgb_indices": rgb_indices,
+    "input_channel_select": input_channel_select,
+}
+
+with open(os.path.join(save_dir, "config.json"), "w") as f:
+    json.dump(config, f, indent=2)
+
+logger.info("========== CONFIG ==========")
+for k, v in config.items():
+    logger.info(f"{k}: {v}")
+
+
+# -----------------------------------------------------------------------------
+# History
+# -----------------------------------------------------------------------------
+history = {
+    "epoch": [],
+
+    # Train losses
+    "train_G_total": [],
+    "train_G_GAN": [],
+    "train_G_L1_weighted": [],
+    "train_G_L1_raw": [],
+    "train_SSIM_loss": [],
+    "train_SSIM_metric": [],
+    "train_LPIPS_loss": [],
+    "train_LPIPS_metric": [],
+
+    # Discriminator
+    "train_D_loss": [],
+    "train_D_real": [],
+    "train_D_fake": [],
+
+    # Validation
+    "val_L1": [],
+    "val_SSIM": [],
+    "val_LPIPS": [],
+    "val_total": [],
+
+    # LR
+    "lr_G": [],
+    "lr_D": [],
+}
+
+
+best_val_l1 = float("inf")
+best_val_lpips = float("inf")
+best_val_total = float("inf")
+best_val_ssim = -float("inf")
+
+
+# -----------------------------------------------------------------------------
+# Checkpointing
+# -----------------------------------------------------------------------------
+checkpoint_path = os.path.join(save_dir, "checkpoint_last.pt")
+start_epoch = 0
+
+
+def save_checkpoint(epoch_idx: int):
+    ckpt = {
+        "epoch": epoch_idx,
+        "netG": netG.state_dict(),
+        "netD": netD.state_dict(),
+        "optimizer_G": optimizer_G.state_dict(),
+        "optimizer_D": optimizer_D.state_dict(),
+        "scheduler_G": scheduler_G.state_dict() if scheduler_G is not None else None,
+        "scheduler_D": scheduler_D.state_dict() if scheduler_D is not None else None,
+        "best_val_l1": best_val_l1,
+        "best_val_lpips": best_val_lpips,
+        "best_val_ssim": best_val_ssim,
+        "best_val_total": best_val_total,
+        "history": history,
+        "config": config,
+    }
+
+    torch.save(ckpt, checkpoint_path)
+
+
+def try_resume():
+    global start_epoch
+    global best_val_l1, best_val_lpips, best_val_ssim, best_val_total
+    global history
+
+    if not os.path.isfile(checkpoint_path):
+        print("[RESUME] No checkpoint found. Starting fresh.")
+        return
+
+    print(f"[RESUME] Loading checkpoint from {checkpoint_path}")
+
+    ckpt = torch.load(checkpoint_path, map_location=device)
+
+    netG.load_state_dict(ckpt["netG"])
+    netD.load_state_dict(ckpt["netD"])
+    optimizer_G.load_state_dict(ckpt["optimizer_G"])
+    optimizer_D.load_state_dict(ckpt["optimizer_D"])
+
+    if use_lr_decay:
+        if scheduler_G is not None and ckpt.get("scheduler_G") is not None:
+            scheduler_G.load_state_dict(ckpt["scheduler_G"])
+        if scheduler_D is not None and ckpt.get("scheduler_D") is not None:
+            scheduler_D.load_state_dict(ckpt["scheduler_D"])
+
+    best_val_l1 = ckpt.get("best_val_l1", ckpt.get("best_val_loss", best_val_l1))
+    best_val_lpips = ckpt.get("best_val_lpips", best_val_lpips)
+    best_val_ssim = ckpt.get("best_val_ssim", best_val_ssim)
+    best_val_total = ckpt.get("best_val_total", best_val_total)
+
+    loaded_history = ckpt.get("history", None)
+    if isinstance(loaded_history, dict):
+        for key in history.keys():
+            if key in loaded_history:
+                history[key] = loaded_history[key]
+
+    start_epoch = ckpt.get("epoch", -1) + 1
+
+    print(f"[RESUME] Resuming at epoch {start_epoch + 1} of {epochs}")
+
+
+try_resume()
+
+# Optional: force both G and D to the same LR after resume.
+if set_lrs_on_resume is not None and start_epoch > 0:
+    forced_lr_G = set_lrs_on_resume["G"]
+    forced_lr_D = set_lrs_on_resume["D"]
+
+    for pg in optimizer_G.param_groups:
+        pg["lr"] = forced_lr_G
+
+    for pg in optimizer_D.param_groups:
+        pg["lr"] = forced_lr_D
+
+    print(
+        f"[LR OVERRIDE] Resumed checkpoint. "
+        f"Set G LR to {forced_lr_G:.2e}, D LR to {forced_lr_D:.2e}"
+    )
+    logger.info(
+        f"[LR OVERRIDE] Resumed checkpoint. "
+        f"Set G LR to {forced_lr_G:.2e}, D LR to {forced_lr_D:.2e}"
+    )
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def set_requires_grad(net, flag: bool):
+    for p in net.parameters():
+        p.requires_grad = flag
+
+
+def nhwc_to_nchw(x: torch.Tensor) -> torch.Tensor:
+    return x.permute(0, 3, 1, 2)
+
+
+def select_rgb_from_nhwc(x: torch.Tensor, rgb_idx) -> torch.Tensor:
+    r, g, b = rgb_idx
+    return torch.stack([x[..., r], x[..., g], x[..., b]], dim=-1)
+
+
+def compute_val_total(val_l1, val_ssim, val_lpips):
+    """
+    Weighted validation objective comparable to the non-adversarial part
+    of the generator loss.
+    """
+    total = lambda_L1 * val_l1
+
+    if use_ssim and val_ssim is not None:
+        total += lambda_ssim * (1.0 - val_ssim)
+
+    if use_lpips and val_lpips is not None:
+        total += lambda_lpips * val_lpips
+
+    return total
+
+
+def save_history_csv():
+    csv_path = os.path.join(save_dir, "history.csv")
+
+    keys = list(history.keys())
+    rows = zip(*[history[k] for k in keys])
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(keys)
+        writer.writerows(rows)
+
+
+def save_history_json():
+    json_path = os.path.join(save_dir, "history.json")
+
+    with open(json_path, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def plot_curve(x, ys, labels, title, ylabel, filename):
+    plt.figure(figsize=(12, 6))
+
+    for y, label in zip(ys, labels):
+        # Skip if the series is all None
+        if all(v is None for v in y):
+            continue
+        plt.plot(x, y, label=label)
+
+    plt.title(title)
+    plt.xlabel("Epoch")
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, filename), dpi=200)
+    plt.close()
+
+
+def save_detailed_training_plots():
+    if len(history["epoch"]) == 0:
+        return
+
+    x = history["epoch"]
+
+    plot_curve(
+        x,
+        [
+            history["train_G_total"],
+            history["train_G_GAN"],
+            history["train_G_L1_weighted"],
+            history["train_SSIM_loss"],
+            history["train_LPIPS_loss"],
+        ],
+        [
+            "G total",
+            "G GAN",
+            "G L1 weighted",
+            "G SSIM loss",
+            "G LPIPS loss",
+        ],
+        "Training Generator Loss Components",
+        "Loss",
+        "training_generator_loss_components.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["train_D_loss"],
+            history["train_D_real"],
+            history["train_D_fake"],
+        ],
+        [
+            "D total",
+            "D real",
+            "D fake",
+        ],
+        "Training Discriminator Loss Components",
+        "Loss",
+        "training_discriminator_loss_components.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["train_G_L1_raw"],
+            history["val_L1"],
+        ],
+        [
+            "Train L1 raw",
+            "Val L1",
+        ],
+        "Raw L1 Reconstruction Loss",
+        "L1",
+        "l1_train_vs_val.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["train_SSIM_metric"],
+            history["val_SSIM"],
+        ],
+        [
+            "Train SSIM",
+            "Val SSIM",
+        ],
+        "SSIM Metric",
+        "SSIM",
+        "ssim_train_vs_val.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["train_LPIPS_metric"],
+            history["val_LPIPS"],
+        ],
+        [
+            "Train LPIPS",
+            "Val LPIPS",
+        ],
+        "LPIPS Metric",
+        "LPIPS",
+        "lpips_train_vs_val.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["val_total"],
+        ],
+        [
+            "Val weighted total",
+        ],
+        "Weighted Validation Objective",
+        "Weighted validation objective",
+        "validation_weighted_total.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["lr_G"],
+            history["lr_D"],
+        ],
+        [
+            "LR Generator",
+            "LR Discriminator",
+        ],
+        "Learning Rate Schedule",
+        "Learning rate",
+        "learning_rate_schedule.png",
+    )
+
+
+def save_best_models(metric_name):
+    torch.save(
+        netG.state_dict(),
+        os.path.join(save_dir, f"{model_name}_best_{metric_name}_netG.pth"),
+    )
+
+    torch.save(
+        netD.state_dict(),
+        os.path.join(save_dir, f"{model_name}_best_{metric_name}_netD.pth"),
+    )
+
+
+# -----------------------------------------------------------------------------
+# Training loop
+# -----------------------------------------------------------------------------
+for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", position=0):
+    epoch_start = time.time()
+
+    netG.train()
+    netD.train()
+
+    # G-only warmup
+    g_only = epoch < warmup_g_only_epochs
+
+    train_G_total_sum = 0.0
+    train_G_GAN_sum = 0.0
+    train_G_L1_weighted_sum = 0.0
+    train_G_L1_raw_sum = 0.0
+    train_SSIM_loss_sum = 0.0
+    train_SSIM_metric_sum = 0.0
+    train_LPIPS_loss_sum = 0.0
+    train_LPIPS_metric_sum = 0.0
+
+    train_D_loss_sum = 0.0
+    train_D_real_sum = 0.0
+    train_D_fake_sum = 0.0
+
+    num_samples_seen = 0
+
+    with tqdm(
+        train_loader,
+        desc=f"Epoch {epoch + 1}",
+        unit="batch",
+        leave=False,
+        position=1,
+    ) as batch_pbar:
+
+        for real_A, real_B in batch_pbar:
+            real_A = real_A.to(device)
+            real_B = real_B.to(device)
+
+            bsz = real_A.size(0)
+            num_samples_seen += bsz
+
+            loss_D = torch.tensor(0.0, device=device)
+            loss_D_real = torch.tensor(0.0, device=device)
+            loss_D_fake = torch.tensor(0.0, device=device)
+
+            # ---------------------------
+            # (1) Discriminator updates
+            # ---------------------------
+            if not g_only and d_steps_per_iter > 0:
+                set_requires_grad(netD, True)
+
+                running_D_loss = 0.0
+                running_D_real = 0.0
+                running_D_fake = 0.0
+
+                for _ in range(d_steps_per_iter):
+                    optimizer_D.zero_grad()
+
+                    with torch.no_grad():
+                        fake_B_detached = netG(real_A)
+
+                    pred_real = netD(
+                        torch.cat((real_A, real_B), -1).permute(0, 3, 1, 2)
+                    )
+
+                    pred_fake = netD(
+                        torch.cat((real_A, fake_B_detached), -1).permute(0, 3, 1, 2)
+                    )
+
+                    loss_D_real = criterionGAN(pred_real, True)
+                    loss_D_fake = criterionGAN(pred_fake, False)
+                    loss_D = 0.5 * (loss_D_real + loss_D_fake)
+
+                    loss_D.backward()
+                    optimizer_D.step()
+
+                    running_D_loss += loss_D.item()
+                    running_D_real += loss_D_real.item()
+                    running_D_fake += loss_D_fake.item()
+
+                avg_D_loss = running_D_loss / d_steps_per_iter
+                avg_D_real = running_D_real / d_steps_per_iter
+                avg_D_fake = running_D_fake / d_steps_per_iter
+
+                train_D_loss_sum += avg_D_loss * bsz
+                train_D_real_sum += avg_D_real * bsz
+                train_D_fake_sum += avg_D_fake * bsz
+
+            else:
+                set_requires_grad(netD, False)
+                avg_D_loss = 0.0
+                avg_D_real = 0.0
+                avg_D_fake = 0.0
+
+            # ---------------------------
+            # (2) Generator updates
+            # ---------------------------
+            set_requires_grad(netD, False)
+
+            running_G_total = 0.0
+            running_G_GAN = 0.0
+            running_G_L1_weighted = 0.0
+            running_G_L1_raw = 0.0
+            running_SSIM_loss = 0.0
+            running_SSIM_metric = 0.0
+            running_LPIPS_loss = 0.0
+            running_LPIPS_metric = 0.0
+
+            for _ in range(max(1, g_steps_per_iter)):
+                optimizer_G.zero_grad()
+
+                fake_B = netG(real_A)
+
+                # During G-only warmup, do NOT use GAN loss against a random/frozen D.
+                if g_only:
+                    loss_G_GAN = torch.tensor(0.0, device=device)
+                else:
+                    pred_fake = netD(
+                        torch.cat((real_A, fake_B), -1).permute(0, 3, 1, 2)
+                    )
+                    loss_G_GAN = criterionGAN(pred_fake, True)
+
+                loss_G_L1_raw = criterionL1(fake_B, real_B)
+                loss_G_L1_weighted = loss_G_L1_raw * lambda_L1
+
+                loss_SSIM = torch.tensor(0.0, device=device)
+                ssim_val_for_log = None
+
+                if use_ssim and ssim is not None:
+                    ssim_val_for_log = ssim(
+                        nhwc_to_nchw(fake_B),
+                        nhwc_to_nchw(real_B),
+                    )
+                    loss_SSIM = (1.0 - ssim_val_for_log) * lambda_ssim
+
+                loss_LPIPS = torch.tensor(0.0, device=device)
+                lpips_val_for_log = None
+
+                if use_lpips and lpips_fn is not None:
+                    fake_rgb = select_rgb_from_nhwc(fake_B, rgb_indices)
+                    real_rgb = select_rgb_from_nhwc(real_B, rgb_indices)
+
+                    # Already in [-1, 1]
+                    lpips_val_for_log = lpips_fn(
+                        nhwc_to_nchw(fake_rgb),
+                        nhwc_to_nchw(real_rgb),
+                    ).mean()
+
+                    loss_LPIPS = lpips_val_for_log * lambda_lpips
+
+                loss_G = lambda_GAN * loss_G_GAN + loss_G_L1_weighted + loss_SSIM + loss_LPIPS
+
+                loss_G.backward()
+                optimizer_G.step()
+
+                running_G_total += loss_G.item()
+                running_G_GAN += loss_G_GAN.item()
+                running_G_L1_weighted += loss_G_L1_weighted.item()
+                running_G_L1_raw += loss_G_L1_raw.item()
+                running_SSIM_loss += loss_SSIM.item()
+
+                if ssim_val_for_log is not None:
+                    running_SSIM_metric += ssim_val_for_log.item()
+
+                running_LPIPS_loss += loss_LPIPS.item()
+
+                if lpips_val_for_log is not None:
+                    running_LPIPS_metric += lpips_val_for_log.item()
+
+            denom_g = max(1, g_steps_per_iter)
+
+            avg_G_total = running_G_total / denom_g
+            avg_G_GAN = running_G_GAN / denom_g
+            avg_G_L1_weighted = running_G_L1_weighted / denom_g
+            avg_G_L1_raw = running_G_L1_raw / denom_g
+            avg_SSIM_loss = running_SSIM_loss / denom_g
+            avg_LPIPS_loss = running_LPIPS_loss / denom_g
+
+            avg_SSIM_metric = (
+                running_SSIM_metric / denom_g
+                if use_ssim and ssim is not None
+                else None
+            )
+
+            avg_LPIPS_metric = (
+                running_LPIPS_metric / denom_g
+                if use_lpips and lpips_fn is not None
+                else None
+            )
+
+            train_G_total_sum += avg_G_total * bsz
+            train_G_GAN_sum += avg_G_GAN * bsz
+            train_G_L1_weighted_sum += avg_G_L1_weighted * bsz
+            train_G_L1_raw_sum += avg_G_L1_raw * bsz
+            train_SSIM_loss_sum += avg_SSIM_loss * bsz
+            train_LPIPS_loss_sum += avg_LPIPS_loss * bsz
+
+            if avg_SSIM_metric is not None:
+                train_SSIM_metric_sum += avg_SSIM_metric * bsz
+
+            if avg_LPIPS_metric is not None:
+                train_LPIPS_metric_sum += avg_LPIPS_metric * bsz
+
+            batch_pbar.set_postfix(
+                {
+                    "G": f"{avg_G_total:.3f}",
+                    "D": f"{avg_D_loss:.3f}",
+                    "GAN": f"{avg_G_GAN:.3f}",
+                    "L1": f"{avg_G_L1_weighted:.3f}",
+                    "SSIM": f"{avg_SSIM_loss:.3f}" if use_ssim else "off",
+                    "LPIPS": f"{avg_LPIPS_loss:.3f}" if use_lpips else "off",
+                    "lrG": f"{optimizer_G.param_groups[0]['lr']:.2e}",
+                    "lrD": f"{optimizer_D.param_groups[0]['lr']:.2e}",
+                }
+            )
+
+    # ---------------------------
+    # Train epoch averages
+    # ---------------------------
+    n_train = max(1, num_samples_seen)
+
+    train_G_total = train_G_total_sum / n_train
+    train_G_GAN = train_G_GAN_sum / n_train
+    train_G_L1_weighted = train_G_L1_weighted_sum / n_train
+    train_G_L1_raw = train_G_L1_raw_sum / n_train
+    train_SSIM_loss = train_SSIM_loss_sum / n_train
+    train_LPIPS_loss = train_LPIPS_loss_sum / n_train
+
+    train_SSIM_metric = (
+        train_SSIM_metric_sum / n_train
+        if use_ssim and ssim is not None
+        else None
+    )
+
+    train_LPIPS_metric = (
+        train_LPIPS_metric_sum / n_train
+        if use_lpips and lpips_fn is not None
+        else None
+    )
+
+    train_D_loss = train_D_loss_sum / n_train
+    train_D_real = train_D_real_sum / n_train
+    train_D_fake = train_D_fake_sum / n_train
+
+
+    # -----------------------------------------------------------------------------
+    # Validation
+    # -----------------------------------------------------------------------------
+    val_l1_sum = 0.0
+    val_ssim_sum = 0.0
+    val_lpips_sum = 0.0
+    n_val = 0
+
+    netG.eval()
+
+    with tqdm(
+        val_loader,
+        desc="Validating",
+        unit="batch",
+        leave=False,
+        position=2,
+    ) as val_pbar:
+
+        with torch.no_grad():
+            for batch_X, batch_y in val_pbar:
+                batch_X = batch_X.to(device)
+                batch_y = batch_y.to(device)
+
+                bsz = batch_X.size(0)
+                n_val += bsz
+
+                outputs = netG(batch_X)
+
+                l1 = criterionL1(outputs, batch_y).item()
+                val_l1_sum += l1 * bsz
+
+                if use_ssim and ssim is not None:
+                    ssim_val = ssim(
+                        nhwc_to_nchw(outputs),
+                        nhwc_to_nchw(batch_y),
+                    ).item()
+                    val_ssim_sum += ssim_val * bsz
+
+                if use_lpips and lpips_fn is not None:
+                    out_rgb = select_rgb_from_nhwc(outputs, rgb_indices)
+                    tgt_rgb = select_rgb_from_nhwc(batch_y, rgb_indices)
+
+                    lp = lpips_fn(
+                        nhwc_to_nchw(out_rgb),
+                        nhwc_to_nchw(tgt_rgb),
+                    ).mean().item()
+
+                    val_lpips_sum += lp * bsz
+
+                val_pbar.set_postfix({"val_L1": f"{l1:.6f}"})
+
+    n_val = max(1, n_val)
+
+    val_l1 = val_l1_sum / n_val
+
+    val_ssim = (
+        val_ssim_sum / n_val
+        if use_ssim and ssim is not None
+        else None
+    )
+
+    val_lpips = (
+        val_lpips_sum / n_val
+        if use_lpips and lpips_fn is not None
+        else None
+    )
+
+    val_total = compute_val_total(val_l1, val_ssim, val_lpips)
+
+
+    # -----------------------------------------------------------------------------
+    # LR scheduling: G and D decay together
+    # -----------------------------------------------------------------------------
+    metric_for_scheduler = val_l1 if scheduler_metric == "val_l1" else val_total
+
+    scheduler_active_this_epoch = True
+
+    if decay_after_warmup_only and epoch < decay_starting_epoch:
+        scheduler_active_this_epoch = False
+
+    if use_lr_decay and scheduler_active_this_epoch:
+        scheduler_G.step(metric_for_scheduler)
+        scheduler_D.step(metric_for_scheduler)
+
+    current_lr_G = optimizer_G.param_groups[0]["lr"]
+    current_lr_D = optimizer_D.param_groups[0]["lr"]
+
+
+    # -----------------------------------------------------------------------------
+    # Save history
+    # -----------------------------------------------------------------------------
+    history["epoch"].append(epoch + 1)
+
+    history["train_G_total"].append(train_G_total)
+    history["train_G_GAN"].append(train_G_GAN)
+    history["train_G_L1_weighted"].append(train_G_L1_weighted)
+    history["train_G_L1_raw"].append(train_G_L1_raw)
+    history["train_SSIM_loss"].append(train_SSIM_loss)
+    history["train_SSIM_metric"].append(train_SSIM_metric)
+    history["train_LPIPS_loss"].append(train_LPIPS_loss)
+    history["train_LPIPS_metric"].append(train_LPIPS_metric)
+
+    history["train_D_loss"].append(train_D_loss)
+    history["train_D_real"].append(train_D_real)
+    history["train_D_fake"].append(train_D_fake)
+
+    history["val_L1"].append(val_l1)
+    history["val_SSIM"].append(val_ssim)
+    history["val_LPIPS"].append(val_lpips)
+    history["val_total"].append(val_total)
+
+    history["lr_G"].append(current_lr_G)
+    history["lr_D"].append(current_lr_D)
+
+
+    # -----------------------------------------------------------------------------
+    # Console/log output
+    # -----------------------------------------------------------------------------
+    epoch_time = time.time() - epoch_start
+
+    summary = (
+        f"Epoch {epoch + 1}/{epochs} - {epoch_time:.1f}s | "
+        f"Train G total: {train_G_total:.6f} | "
+        f"G_GAN: {train_G_GAN:.6f} | "
+        f"G_L1_raw: {train_G_L1_raw:.6f} | "
+        f"G_L1_w: {train_G_L1_weighted:.6f} | "
+        f"G_SSIM_loss: {train_SSIM_loss:.6f} | "
+        f"G_LPIPS_loss: {train_LPIPS_loss:.6f} | "
+        f"D: {train_D_loss:.6f} | "
+        f"D_real: {train_D_real:.6f} | "
+        f"D_fake: {train_D_fake:.6f} | "
+        f"Val L1: {val_l1:.6f} | "
+        f"Val total: {val_total:.6f} | "
+        f"LR_G: {current_lr_G:.2e} | "
+        f"LR_D: {current_lr_D:.2e}"
+    )
+
+    if val_ssim is not None:
+        summary += f" | Val SSIM: {val_ssim:.4f}"
+
+    if val_lpips is not None:
+        summary += f" | Val LPIPS: {val_lpips:.4f}"
+
+    tqdm.write("\n" + summary)
+    logger.info(summary)
+
+
+    # -----------------------------------------------------------------------------
+    # Periodic qualitative samples
+    # -----------------------------------------------------------------------------
+    if (epoch % 10 == 0) or (epoch == epochs - 1):
+        try:
+            save_monitor_samples(
+                epoch_idx=epoch,
+                netG=netG,
+                batch_X_cpu=monitor_batch_X,
+                batch_y_cpu=monitor_batch_y,
+                rgb_idx=rgb_indices,
+                out_root=samples_dir,
+                include_input=True,
+                device=device,
+            )
+
+            tqdm.write(
+                f"Saved monitor samples for epoch {epoch + 1} → "
+                f"{os.path.join(samples_dir, f'epoch_{epoch + 1:03d}')}"
+            )
+
+        except Exception as e:
+            tqdm.write(f"[WARN] Failed to save monitor samples: {e}")
+            logger.warning(f"Failed to save monitor samples: {e}")
+
+
+    # -----------------------------------------------------------------------------
+    # Save best models by multiple validation metrics
+    # Training continues to the final epoch; there is NO early stopping.
+    # -----------------------------------------------------------------------------
+    if save_best_by_val_l1 and val_l1 < best_val_l1:
+        best_val_l1 = val_l1
+        save_best_models("val_l1")
+
+        # Legacy names for compatibility with your old workflow
+        torch.save(netG.state_dict(), os.path.join(save_dir, f"{model_name}_best_netG.pth"))
+        torch.save(netD.state_dict(), os.path.join(save_dir, f"{model_name}_best_netD.pth"))
+
+        tqdm.write(f"[BEST] New best Val L1: {best_val_l1:.6f}")
+        logger.info(f"[BEST] New best Val L1: {best_val_l1:.6f}")
+
+    if save_best_by_val_ssim and val_ssim is not None and val_ssim > best_val_ssim:
+        best_val_ssim = val_ssim
+        save_best_models("val_ssim")
+
+        tqdm.write(f"[BEST] New best Val SSIM: {best_val_ssim:.6f}")
+        logger.info(f"[BEST] New best Val SSIM: {best_val_ssim:.6f}")
+
+    if save_best_by_val_lpips and val_lpips is not None and val_lpips < best_val_lpips:
+        best_val_lpips = val_lpips
+        save_best_models("val_lpips")
+
+        tqdm.write(f"[BEST] New best Val LPIPS: {best_val_lpips:.6f}")
+        logger.info(f"[BEST] New best Val LPIPS: {best_val_lpips:.6f}")
+
+    if save_best_by_val_total and val_total < best_val_total:
+        best_val_total = val_total
+        save_best_models("val_total")
+
+        tqdm.write(f"[BEST] New best weighted Val total: {best_val_total:.6f}")
+        logger.info(f"[BEST] New best weighted Val total: {best_val_total:.6f}")
+
+
+    # -----------------------------------------------------------------------------
+    # Save checkpoint and plots every epoch
+    # -----------------------------------------------------------------------------
+    save_checkpoint(epoch)
+    save_history_csv()
+    save_history_json()
+    save_detailed_training_plots()
+
+
+# -----------------------------------------------------------------------------
+# Done
+# -----------------------------------------------------------------------------
+save_history_csv()
+save_history_json()
+save_detailed_training_plots()
+
+print("\nTraining finished.")
+print(f"Saved outputs in: {save_dir}")
+print("Important files:")
+print(f"  Last checkpoint: {checkpoint_path}")
+print(f"  History CSV: {os.path.join(save_dir, 'history.csv')}")
+print(f"  History JSON: {os.path.join(save_dir, 'history.json')}")
+print(f"  Best Val L1 G: {os.path.join(save_dir, f'{model_name}_best_val_l1_netG.pth')}")
+print(f"  Best Val Total G: {os.path.join(save_dir, f'{model_name}_best_val_total_netG.pth')}")

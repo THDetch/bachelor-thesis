@@ -1,0 +1,47 @@
+{
+  "data_dir": "/home/dll1801/mdpi_manuscript/datasets/SEN12MS",
+  "seasons": [
+    "spring",
+    "summer",
+    "fall",
+    "winter"
+  ],
+  "output_dir": "dataset_all_seasons_metadata",
+  "max_samples": 32000,
+  "samples_per_season": 8000,
+  "p_train": 0.8,
+  "p_val": 0.1,
+  "p_test": 0.1,
+  "crop_size": 256,
+  "crops_per_image": 1,
+  "image_counts": {
+    "train": 25600,
+    "val": 3200,
+    "test": 3200
+  },
+  "crop_counts": {
+    "train": 25600,
+    "val": 3200,
+    "test": 3200
+  },
+  "season_distribution": {
+    "train": {
+      "spring": 6400,
+      "summer": 6400,
+      "fall": 6400,
+      "winter": 6400
+    },
+    "val": {
+      "spring": 800,
+      "summer": 800,
+      "fall": 800,
+      "winter": 800
+    },
+    "test": {
+      "spring": 800,
+      "summer": 800,
+      "fall": 800,
+      "winter": 800
+    }
+  }
+}

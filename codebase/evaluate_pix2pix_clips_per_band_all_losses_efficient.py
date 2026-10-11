@@ -22,10 +22,11 @@ gpu_id = 0
 input_channel_select = None  # 0, 1, or None (all)
 models_to_run = ["pix2pix"]
 # DATA_DIR = "dataset_cr_winter_test"
-MODEL_DIR = "trained-full"
+MODEL_DIR = "trained_all_seasons_debugged_loss_balance_label_smoothing"
 
-DATA_DIR = "/home/dll0505/AdditionalStorage/thesis/sen12-ms-cr/dataset_winter_all"
-RESULTS_DIR = f"{MODEL_DIR}/evaluation_results_per_band_all_losses_efficient"
+DATA_DIR = "/home/dll1801/mdpi_manuscript/code/bachelor-thesis/codebase/dataset_all_seasons"
+# DATA_DIR = "/home/dll0505/AdditionalStorage/thesis/sen12-ms-cr/dataset_winter_all"
+RESULTS_DIR = f"{MODEL_DIR}/evaluation"
 
 
 # RESULTS_DIR = f"{MODEL_DIR}/cr_evaluation_summer_band_all_losses_"
@@ -353,7 +354,7 @@ def main():
         {
             'model_class': Pix2PixWrapper,
             'model_name': 'pix2pix',
-            'params': {'in_channels': C_in, 'out_channels': C_out, 'img_size': H},
+            'params': {'in_channels': C_in, 'out_channels': C_out, 'img_size': H, 'norm': "instance"},
             'model_file': 'pix2pix_best_netG.pth'
         }
     ]

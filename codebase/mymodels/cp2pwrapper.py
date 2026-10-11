@@ -3,16 +3,11 @@ import torch.nn as nn
 import sys
 from pathlib import Path
 import math
-########################  IMPORTANT ########################
+
 # --- Path setup for pytorch-CycleGAN-and-pix2pix ---
-# This wrapper assumes it's located you cloned the original Pix2Pix source code and it is in the same directory as the wrapper and both are saved in a package called mymodels 
-# (you can name it whatever you want, but you will then have to change a lot of paths across many scripts. Good luck :) )
-# https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix
-# Or simply unzip the mymodels.zip file 
-#
-# Note: The original implementation exhibited some GAN-related issues (slow convergence, checkerboard artifacts).
-# To overcome these issues, some "minor" modifications were done to the original implementaion
-# To apply the same modifications, refer to the thesis document (Sec:  Challenges Due to Inherent Model Characteristics)
+# This wrapper assumes it's located in 'sar-optical/models' and the GAN repo
+# is in 'sar-optical/models/pytorch-CycleGAN-and-pix2pix'.
+# We add the repo's root to the path to allow for its internal imports.
 try:
     gan_repo_path = Path(__file__).parent / 'pytorch-CycleGAN-and-pix2pix'
     if gan_repo_path.is_dir():
@@ -31,17 +26,17 @@ except ImportError as e:
     raise
 
 class Pix2PixWrapper(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, img_size: int = 256):
+    def __init__(self, in_channels: int, out_channels: int, img_size: int = 64, norm = "batch"):
         super().__init__()
         
         # --- Generator Configuration ---
         # The 'unet_256' architecture is too deep for 64x64 images, causing an error.
         # We need a U-Net with fewer downsampling layers. For a 64x64 input, 6
         # downsampling layers will result in a 1x1 feature map at the bottleneck.
+        print("G norm --> ", norm)
         num_downs = int(math.log2(img_size))
-        print("num_downs: ", num_downs)
-        ngf = 64 # the number of filters in the last conv layer
-        norm_layer = get_norm_layer(norm_type='batch')
+        ngf = 64
+        norm_layer = get_norm_layer(norm_type=norm)
         
         # We instantiate the UnetGenerator directly to control the 'num_downs' parameter.
         # We also call 'init_net' to apply the weight initialization as the original script does.
@@ -51,7 +46,6 @@ class Pix2PixWrapper(nn.Module):
             num_downs=num_downs,
             ngf=ngf,
             norm_layer=norm_layer,
-            up_mode="resize_conv",
             use_dropout=False
         )
 
@@ -79,8 +73,8 @@ class Pix2PixWrapper(nn.Module):
 if __name__ == '__main__':
     # Test the forward pass
     batch_size = 2
-    height = 256
-    width = 256
+    height = 128
+    width = 128
     channels_in = 2   # Example: SAR data (e.g., VV, VH)
     channels_out = 13 # Example: Multispectral output
 

@@ -31,15 +31,17 @@ torch.backends.cudnn.benchmark = True  # faster on fixed-size tensors
 # Data / Experiment config
 # -----------------------------------------------------------------------------
 input_channel_select = None  # 0, 1, or None (all)
-epochs = 300
+epochs = 150
 batch_size = 16
 lr = 1e-4
 patience = 20
-data_dir = "dataset_winter_all"
+# data_dir = "dataset_winter_all"
+data_dir = "dataset_all_seasons_metadata"
 
 
 model_name = "pix2pix"
-save_dir = f"trained-full/{model_name}"
+# save_dir = f"trained-full/{model_name}"
+save_dir = f"trained_all_seasons_metadata/{model_name}"
 
 # Warmup and update ratio
 warmup_g_only_epochs = 20  # train only G for first N epochs
@@ -145,7 +147,7 @@ if use_lpips:
 # -----------------------------------------------------------------------------
 optimizer_G = torch.optim.Adam(netG.parameters(), lr=lr, betas=(0.5, 0.999))
 optimizer_D = torch.optim.Adam(netD.parameters(), lr=lr, betas=(0.5, 0.999))
-scheduler_G = ReduceLROnPlateau(optimizer_G, "min", patience=patience // 2, factor=0.5)
+scheduler_G = ReduceLROnPlateau(optimizer_G, "min", patience=patience, factor=0.5)
 # Keep D LR fixed when controlling D frequency manually
 
 param_count_G = sum(p.numel() for p in netG.parameters() if p.requires_grad)
@@ -170,6 +172,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger()
+
+logger.info(f"Num of Epochs: {epochs}")
+logger.info(f"Data Dir: {data_dir}")
+logger.info(f"Patience: {patience}")
+logger.info(f"Batch Size: {batch_size}")
+logger.info(f"Learning Rate: {lr}")
+logger.info(f"Lambda L1: {lambda_L1}")
+logger.info(f"Lambda SSIM: {lambda_ssim}")
+logger.info(f"Lambda LPIPS: {lambda_lpips}")
+
 
 # -----------------------------------------------------------------------------
 # Checkpointing (Save + Resume)
@@ -230,6 +242,32 @@ def try_resume():
 try_resume()
 
 # -----------------------------------------------------------------------------
+# Manually override ONLY Generator LR after resume
+# -----------------------------------------------------------------------------
+resume_with_halved_g_lr = True
+resume_g_lr = 5e-5  # half of 1e-4
+
+if resume_with_halved_g_lr and start_epoch > 0:
+    for param_group in optimizer_G.param_groups:
+        param_group["lr"] = resume_g_lr
+
+    print(f"[LR OVERRIDE] Resumed from checkpoint. Set ONLY Generator LR to {resume_g_lr:.2e}")
+    logger.info(f"[LR OVERRIDE] Resumed from checkpoint. Set ONLY Generator LR to {resume_g_lr:.2e}")
+
+    print(f"[LR INFO] Discriminator LR kept from checkpoint: {optimizer_D.param_groups[0]['lr']:.2e}")
+    logger.info(f"[LR INFO] Discriminator LR kept from checkpoint: {optimizer_D.param_groups[0]['lr']:.2e}")
+
+    # Reset Generator scheduler so it uses the new patience=20 from this resumed run
+    scheduler_G = ReduceLROnPlateau(
+        optimizer_G,
+        mode="min",
+        patience=patience,
+        factor=0.5
+    )
+
+    print(f"[SCHEDULER RESET] Generator LR scheduler reset with patience={patience}, factor=0.5")
+    logger.info(f"[SCHEDULER RESET] Generator LR scheduler reset with patience={patience}, factor=0.5")
+# -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
 def set_requires_grad(net, flag: bool):
@@ -270,30 +308,41 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
             bsz = real_A.size(0)
             num_samples_seen += bsz
 
+            # Keep this defined even during warmup
+            loss_D = torch.tensor(0.0, device=device)
+
             # ---------------------------
             # (1) Discriminator updates
             # ---------------------------
             if not g_only and d_steps_per_iter > 0:
                 set_requires_grad(netD, True)
+
                 for _ in range(d_steps_per_iter):
                     optimizer_D.zero_grad()
-                    # Fake for D (no G grad to save mem)
+
+                    # Fake for D only; no G gradient here
                     with torch.no_grad():
                         fake_B_detached = netG(real_A)
+
                     pred_real = netD(
                         torch.cat((real_A, real_B), -1).permute(0, 3, 1, 2)
                     )
+
                     pred_fake = netD(
                         torch.cat((real_A, fake_B_detached), -1).permute(0, 3, 1, 2)
                     )
+
                     loss_D_real = criterionGAN(pred_real, True)
                     loss_D_fake = criterionGAN(pred_fake, False)
                     loss_D = 0.5 * (loss_D_real + loss_D_fake)
+
                     loss_D.backward()
                     optimizer_D.step()
+
                 train_D_loss += loss_D.item() * bsz
+
             else:
-                # Warmup: keep D frozen
+                # Warmup: keep D frozen and do not update it
                 set_requires_grad(netD, False)
 
             # ---------------------------
@@ -304,37 +353,51 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
             for _ in range(max(1, g_steps_per_iter)):
                 optimizer_G.zero_grad()
+
                 fake_B = netG(real_A)
 
+                # ---------------------------------------------------------
                 # Adversarial loss
-                pred_fake = netD(torch.cat((real_A, fake_B), -1).permute(0, 3, 1, 2))
-                loss_G_GAN = criterionGAN(pred_fake, True)
+                # ---------------------------------------------------------
+                # During G-only warmup, do NOT use GAN loss.
+                # Otherwise, G would optimize against a random frozen D.
+                if g_only:
+                    loss_G_GAN = torch.tensor(0.0, device=device)
+                else:
+                    pred_fake = netD(
+                        torch.cat((real_A, fake_B), -1).permute(0, 3, 1, 2)
+                    )
+                    loss_G_GAN = criterionGAN(pred_fake, True)
 
-                # L1 (use criterionL1 consistently)
+                # L1 reconstruction loss
                 loss_G_L1 = criterionL1(fake_B, real_B) * lambda_L1
 
-                # SSIM (expects NCHW); returns higher-is-better similarity
+                # SSIM loss
                 loss_SSIM = torch.tensor(0.0, device=device)
                 if use_ssim and ssim is not None:
                     ssim_val = ssim(nhwc_to_nchw(fake_B), nhwc_to_nchw(real_B))
                     loss_SSIM = (1.0 - ssim_val) * lambda_ssim
 
-                # LPIPS (needs 3ch, NCHW, in [-1,1])
+                # LPIPS perceptual loss
                 loss_LPIPS = torch.tensor(0.0, device=device)
                 if use_lpips and lpips_fn is not None:
                     fake_rgb = select_rgb_from_nhwc(fake_B, rgb_indices)
                     real_rgb = select_rgb_from_nhwc(real_B, rgb_indices)
 
-                    # If your tensors are already in [-1,1], you can skip to_m11:
-                    fake_rgb_m11 = fake_rgb  # or to_m11(fake_rgb) if your data is [0,1]
-                    real_rgb_m11 = real_rgb  # or to_m11(real_rgb) if your data is [0,1]
+                    # Your tensors are already in [-1, 1], so do not apply to_m11()
+                    fake_rgb_m11 = fake_rgb
+                    real_rgb_m11 = real_rgb
 
                     lpips_val = lpips_fn(
-                        nhwc_to_nchw(fake_rgb_m11), nhwc_to_nchw(real_rgb_m11)
+                        nhwc_to_nchw(fake_rgb_m11),
+                        nhwc_to_nchw(real_rgb_m11)
                     ).mean()
+
                     loss_LPIPS = lpips_val * lambda_lpips
 
+                # Total generator loss
                 loss_G = loss_G_GAN + loss_G_L1 + loss_SSIM + loss_LPIPS
+
                 loss_G.backward()
                 optimizer_G.step()
 
@@ -346,7 +409,8 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
             batch_pbar.set_postfix(
                 {
                     "G": f"{avg_g_loss_this_batch:.3f}",
-                    "D": f"{(loss_D.item() if not g_only else 0.0):.3f}",
+                    "D": f"{loss_D.item():.3f}",
+                    "GAN": f"{loss_G_GAN.item():.3f}",
                     "L1": f"{loss_G_L1.item():.3f}",
                     "SSIM": f"{loss_SSIM.item():.3f}" if use_ssim else "off",
                     "LPIPS": f"{loss_LPIPS.item():.3f}" if use_lpips else "off",
@@ -354,12 +418,13 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                 }
             )
 
-    # Epoch averages (per-sample)
+    # Epoch averages
     train_G_loss /= max(1, num_samples_seen)
     train_D_loss /= max(1, num_samples_seen)
+
     history["loss"].append(train_G_loss)
     history["D_loss"].append(train_D_loss)
-    current_lr = optimizer_G.param_groups[0]["lr"]
+
 
     # -----------------------------------------------------------------------------
     # Validation
@@ -370,6 +435,7 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     n_val = 0
 
     netG.eval()
+
     with tqdm(
         val_loader, desc="Validating", unit="batch", leave=False, position=2
     ) as val_pbar:
@@ -380,52 +446,74 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                 n_val += bsz
 
                 outputs = netG(batch_X)
+
                 l1 = criterionL1(outputs, batch_y).item()
                 val_l1_sum += l1 * bsz
 
                 if use_ssim and ssim is not None:
-                    ssim_val = ssim(nhwc_to_nchw(outputs), nhwc_to_nchw(batch_y)).item()
+                    ssim_val = ssim(
+                        nhwc_to_nchw(outputs),
+                        nhwc_to_nchw(batch_y)
+                    ).item()
                     val_ssim_sum += ssim_val * bsz
 
                 if use_lpips and lpips_fn is not None:
                     out_rgb = select_rgb_from_nhwc(outputs, rgb_indices)
                     tgt_rgb = select_rgb_from_nhwc(batch_y, rgb_indices)
-                    # If already [-1,1], skip to_m11:
-                    out_rgb_m11 = out_rgb  # or to_m11(out_rgb) if [0,1]
-                    tgt_rgb_m11 = tgt_rgb  # or to_m11(tgt_rgb) if [0,1]
+
+                    # Already in [-1, 1]
+                    out_rgb_m11 = out_rgb
+                    tgt_rgb_m11 = tgt_rgb
+
                     lp = (
-                        lpips_fn(nhwc_to_nchw(out_rgb_m11), nhwc_to_nchw(tgt_rgb_m11))
+                        lpips_fn(
+                            nhwc_to_nchw(out_rgb_m11),
+                            nhwc_to_nchw(tgt_rgb_m11)
+                        )
                         .mean()
                         .item()
                     )
+
                     val_lpips_sum += lp * bsz
 
                 val_pbar.set_postfix({"val_L1": f"{l1:.6f}"})
 
-    val_loss = val_l1_sum / max(1, n_val)  # keep scheduler metric as L1
-    history["val_loss"].append(val_loss)
-    history["lr"].append(current_lr)
+    val_loss = val_l1_sum / max(1, n_val)
 
     scheduler_G.step(val_loss)
+
+    current_lr = optimizer_G.param_groups[0]["lr"]
+    history["val_loss"].append(val_loss)
+    history["lr"].append(current_lr)
 
     # Print/log epoch summary
     val_ssim = (val_ssim_sum / n_val) if (use_ssim and n_val > 0) else None
     val_lpips = (val_lpips_sum / n_val) if (use_lpips and n_val > 0) else None
 
     tqdm.write(f"\nEpoch {epoch+1}/{epochs} - {time.time()-epoch_start:.1f}s")
+
     tqdm.write(
-        f"Train G_Loss: {train_G_loss:.6f} | Train D_Loss: {train_D_loss:.6f} | Val L1: {val_loss:.6f}"
+        f"Train G_Loss: {train_G_loss:.6f} | "
+        f"Train D_Loss: {train_D_loss:.6f} | "
+        f"Val L1: {val_loss:.6f}"
         + (f" | Val SSIM: {val_ssim:.4f}" if val_ssim is not None else "")
         + (f" | Val LPIPS: {val_lpips:.4f}" if val_lpips is not None else "")
     )
+
     logger.info(
-        f"Train G_Loss: {train_G_loss:.6f} | Train D_Loss: {train_D_loss:.6f} | Val L1: {val_loss:.6f}"
+        f"Train G_Loss: {train_G_loss:.6f} | "
+        f"Train D_Loss: {train_D_loss:.6f} | "
+        f"Val L1: {val_loss:.6f}"
         + (f" | Val SSIM: {val_ssim:.4f}" if val_ssim is not None else "")
         + (f" | Val LPIPS: {val_lpips:.4f}" if val_lpips is not None else "")
     )
+    logger.info(f">>> Current Learning rate: {current_lr}")
     tqdm.write(f"Learning Rate (G): {current_lr:.2e}")
     logger.info(f"Learning Rate (G): {current_lr:.2e}")
-    # ---------------- NEW: periodic qualitative samples ---------------------------
+
+    # -----------------------------------------------------------------------------
+    # Periodic qualitative samples
+    # -----------------------------------------------------------------------------
     if (epoch % 10 == 0) or (epoch == epochs - 1):
         try:
             save_monitor_samples(
@@ -435,37 +523,48 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                 batch_y_cpu=monitor_batch_y,
                 rgb_idx=rgb_indices,
                 out_root=samples_dir,
-                include_input=True,  # set False if you don't want SAR pseudo-RGB shown
-                device=device
+                include_input=True,
+                device=device,
             )
+
             tqdm.write(
-                f"Saved monitor samples for epoch {epoch+1} → {os.path.join(samples_dir, f'epoch_{epoch+1:03d}')}"
+                f"Saved monitor samples for epoch {epoch+1} → "
+                f"{os.path.join(samples_dir, f'epoch_{epoch+1:03d}')}"
             )
+
         except Exception as e:
             tqdm.write(f"[WARN] Failed to save monitor samples: {e}")
             logger.warning(f"Failed to save monitor samples: {e}")
 
-    # Save best (by Val L1)
+    # -----------------------------------------------------------------------------
+    # Save best model by Val L1
+    # -----------------------------------------------------------------------------
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         wait = 0
+
         torch.save(
-            netG.state_dict(), os.path.join(save_dir, f"{model_name}_best_netG.pth")
+            netG.state_dict(),
+            os.path.join(save_dir, f"{model_name}_best_netG.pth")
         )
+
         torch.save(
-            netD.state_dict(), os.path.join(save_dir, f"{model_name}_best_netD.pth")
+            netD.state_dict(),
+            os.path.join(save_dir, f"{model_name}_best_netD.pth")
         )
+
     else:
         wait += 1
-        # If you want early stopping, flip this:
+
+        # If you want early stopping, change False to True
         if False and wait >= patience:
             tqdm.write(f"\nEarly stopping triggered at epoch {epoch+1}")
             logger.info(f"\nEarly stopping triggered at epoch {epoch+1}")
-            # Save a last checkpoint before exiting early
+
             save_checkpoint(epoch)
             break
 
-    # -------- Save/overwrite "last" checkpoint every epoch (for resume) ----------
+    # Save/overwrite last checkpoint every epoch for resume
     save_checkpoint(epoch)
-
+    
 save_training_plots(history, save_dir, model_name)

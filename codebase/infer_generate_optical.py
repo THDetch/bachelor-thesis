@@ -21,9 +21,9 @@ from mymodels.cp2pwrapper import Pix2PixWrapper  # must exist
 
 
 # ---------- Defaults ----------
-DEFAULT_DATA_DIR = "dataset_winter_all"
-DEFAULT_RESULTS_DIR = "trained-full-copy/generated"
-DEFAULT_MODEL_DIR = "trained-full-copy/pix2pix"
+DEFAULT_DATA_DIR = "dataset_all_seasons"
+DEFAULT_RESULTS_DIR = "trained_all_seasons_debugged_loss_balance_label_smoothing/generated"
+DEFAULT_MODEL_DIR = "trained_all_seasons_debugged_loss_balance_label_smoothing/pix2pix"
 DEFAULT_MODEL_FILE = "pix2pix_best_netG.pth"
 
 
@@ -141,7 +141,7 @@ def load_model(model_dir, model_file, in_ch, out_ch, img_size, device):
     mp = Path(model_dir) / model_file
     if not mp.exists():
         raise FileNotFoundError(f"Model not found: {mp}")
-    model = Pix2PixWrapper(in_channels=in_ch, out_channels=out_ch, img_size=img_size)
+    model = Pix2PixWrapper(in_channels=in_ch, out_channels=out_ch, img_size=img_size, norm="instance")
     # safer load (PyTorch >= 2.4); if your torch is older, drop weights_only
     try:
         state = torch.load(str(mp), map_location=device, weights_only=True)
@@ -262,7 +262,7 @@ def main():
     ap.add_argument("--model_file", default=DEFAULT_MODEL_FILE, help="generator weights file name")
     ap.add_argument("--out_dir", default=DEFAULT_RESULTS_DIR, help="where to write outputs")
     ap.add_argument("--gpu", type=int, default=0, help="CUDA device index")
-    ap.add_argument("--limit", type=int, default=100, help="max number of samples")
+    ap.add_argument("--limit", type=int, default=1000, help="max number of samples")
     ap.add_argument("--offset", type=int, default=0, help="start index")
     ap.add_argument("--input_channel_select", type=int, default=None,
                     help="0 for VV, 1 for VH, None for both (must match training!)")
