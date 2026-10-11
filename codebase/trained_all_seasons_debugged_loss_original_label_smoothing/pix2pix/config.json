@@ -1,0 +1,33 @@
+{
+  "epochs": 100,
+  "batch_size": 16,
+  "lr_initial_G": 0.0001,
+  "lr_initial_D": 0.0001,
+  "use_lr_decay": true,
+  "lr_decay_patience": 10,
+  "lr_decay_factor": 0.5,
+  "lr_min": 1e-06,
+  "decay_after_warmup_only": true,
+  "scheduler_metric": "val_l1",
+  "data_dir": "dataset_all_seasons",
+  "model_name": "pix2pix",
+  "save_dir": "trained_all_seasons_debugged_loss_original_label_smoothing/pix2pix",
+  "warmup_g_only_epochs": 0,
+  "param_count_G": 39163917,
+  "param_count_D": 2777025,
+  "g_steps_per_iter": 1,
+  "d_steps_per_iter": 1,
+  "use_ssim": false,
+  "use_lpips": false,
+  "lambda_GAN": 1.0,
+  "lambda_L1": 100.0,
+  "lambda_ssim": 10.0,
+  "lambda_lpips": 10.0,
+  "ssim_data_range": 2.0,
+  "rgb_indices": [
+    3,
+    2,
+    1
+  ],
+  "input_channel_select": null
+}

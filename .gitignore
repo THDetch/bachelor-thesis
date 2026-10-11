@@ -334,3 +334,6 @@ paper/paper.tex
 journals_BA.docx
 MDPI_template_ACS.zip
 *.npy
+# Large model checkpoints
+*.pt
+*.pth
