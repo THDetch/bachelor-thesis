@@ -339,3 +339,4 @@ MDPI_template_ACS.zip
 *.pth
 .claude/
 .vscode/
+codebase/__pycache__/

@@ -2,8 +2,10 @@
 # making them ready for training.
 #
 # Important:
-# This version uses a SEASON-STRATIFIED split.
-# That means train, val, and test each contain samples from every selected season.
+# This version uses a SCENE-DISJOINT, SEASON-STRATIFIED split.
+# Whole scenes (ROIs) are assigned to exactly one split, so patches that overlap
+# spatially can never be shared between train, val and test.
+# Each split still contains samples from every selected season.
 
 import os
 import sys
@@ -23,7 +25,6 @@ from numpy.lib.format import open_memmap
 
 # Try to keep GDAL internal caching small
 os.environ.setdefault("GDAL_CACHEMAX", "64")  # MB
-os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
 
 
 # -------------------- CONFIG --------------------
@@ -55,7 +56,7 @@ data_dir = "/home/dll1801/mdpi_manuscript/datasets/SEN12MS"
 seasons = ["spring", "summer", "fall", "winter"]
 
 # Output folder
-output_dir = "dataset_all_seasons_metadata"
+output_dir = "dataset_all_seasons_scenesplit"
 
 CROP_SIZE = 256
 DTYPE = np.float32
@@ -146,6 +147,8 @@ def load_tif_as_hwc(path):
 
 
 def to_tanh_range(x, lo, hi):
+    # SEN12-MS contains occasional no-data pixels; map them to the low clip bound.
+    x = np.nan_to_num(x, nan=lo, posinf=hi, neginf=lo)
     x = np.clip(x, lo, hi)
     return 2.0 * (x - lo) / (hi - lo + 1e-9) - 1.0
 
@@ -190,6 +193,12 @@ def hash_score(path):
     This gives stable splitting across repeated runs.
     """
     h = hashlib.md5(os.path.basename(path).encode("utf-8")).hexdigest()
+    return int(h[:8], 16) / 0xFFFFFFFF
+
+
+def hash_key(text):
+    """Deterministic pseudo-random score for an arbitrary key (e.g. a scene id)."""
+    h = hashlib.md5(text.encode("utf-8")).hexdigest()
     return int(h[:8], 16) / 0xFFFFFFFF
 
 
@@ -337,13 +346,16 @@ for season in seasons:
 print(f"\nTotal paired images before split: {total_pairs_found}")
 
 
-# -------------------- SEASON-STRATIFIED TRAIN / VAL / TEST SPLIT --------------------
+# -------------------- SCENE-DISJOINT, SEASON-STRATIFIED SPLIT --------------------
 
 train_pairs = []
 val_pairs = []
 test_pairs = []
 
-print("\nSeason-stratified split:")
+scenes_by_split = {"train": [], "val": [], "test": []}
+quotas = {"train": P_TRAIN, "val": P_VAL, "test": P_TEST}
+
+print("\nScene-disjoint, season-stratified split:")
 
 for season in seasons:
     season_pairs = pairs_by_season[season]
@@ -352,47 +364,58 @@ for season in seasons:
         print(f"  WARNING: Season '{season}' has 0 pairs and will not contribute.")
         continue
 
-    # Already sorted by deterministic hash, but sort again for safety
-    season_pairs.sort(key=lambda t: t[0])
+    by_scene = defaultdict(list)
+
+    for item in season_pairs:
+        roi_group, _, roi_id, _ = extract_roi_info(item[1])
+
+        if roi_group == "unknown" or roi_id == "unknown":
+            print(f"ERROR: Could not parse a scene id from: {item[1]}")
+            print("The scene-disjoint split cannot be trusted with unparsable names.")
+            sys.exit(1)
+
+        by_scene[(roi_group, season, roi_id)].append(item)
+
+    # Largest scenes first, so the greedy fill below lands close to the target ratios.
+    scene_order = sorted(
+        by_scene,
+        key=lambda k: (-len(by_scene[k]), hash_key("|".join(k))),
+    )
 
     M_season = len(season_pairs)
+    target = {split: quotas[split] * M_season for split in quotas}
+    filled = {split: 0 for split in quotas}
 
-    n_train_season = int(round(P_TRAIN * M_season))
-    n_val_season = int(round(P_VAL * M_season))
-    n_test_season = int(round(P_TEST * M_season))
+    buckets = {"train": train_pairs, "val": val_pairs, "test": test_pairs}
 
-    # Ensure totals do not exceed this season's count
-    n_train_season = min(n_train_season, M_season)
-    n_val_season = min(n_val_season, max(0, M_season - n_train_season))
-    n_test_season = min(
-        n_test_season,
-        max(0, M_season - n_train_season - n_val_season)
-    )
+    for scene in scene_order:
+        split = max(quotas, key=lambda s: target[s] - filled[s])
 
-    unused_season = M_season - (
-        n_train_season + n_val_season + n_test_season
-    )
-
-    season_train = season_pairs[0:n_train_season]
-    season_val = season_pairs[
-        n_train_season:n_train_season + n_val_season
-    ]
-    season_test = season_pairs[
-        n_train_season + n_val_season:
-        n_train_season + n_val_season + n_test_season
-    ]
-
-    train_pairs.extend(season_train)
-    val_pairs.extend(season_val)
-    test_pairs.extend(season_test)
+        buckets[split].extend(by_scene[scene])
+        scenes_by_split[split].append(scene)
+        filled[split] += len(by_scene[scene])
 
     print(
-        f"  {season}: total={M_season}, "
-        f"train={len(season_train)}, "
-        f"val={len(season_val)}, "
-        f"test={len(season_test)}, "
-        f"unused={unused_season}"
+        f"  {season}: scenes={len(by_scene)}, total={M_season}, "
+        f"train={filled['train']}, "
+        f"val={filled['val']}, "
+        f"test={filled['test']}"
     )
+
+
+# -------------------- LEAKAGE CHECK --------------------
+
+scene_sets = {split: set(v) for split, v in scenes_by_split.items()}
+
+assert not (scene_sets["train"] & scene_sets["val"]), "Scene leakage between train and val"
+assert not (scene_sets["train"] & scene_sets["test"]), "Scene leakage between train and test"
+assert not (scene_sets["val"] & scene_sets["test"]), "Scene leakage between val and test"
+
+print(
+    f"\nUnique scenes -> train: {len(scene_sets['train'])}, "
+    f"val: {len(scene_sets['val'])}, "
+    f"test: {len(scene_sets['test'])} (verified disjoint)"
+)
 
 # Mix order inside final splits using the deterministic hash score
 train_pairs.sort(key=lambda t: t[0])
@@ -513,8 +536,6 @@ if est_total_gb > avail_gb:
 
 # -------------------- ALLOCATE NPY FILES --------------------
 
-os.makedirs(output_dir, exist_ok=True)
-
 paths = {
     "train": (
         os.path.join(output_dir, "X_train.npy"),
@@ -587,6 +608,14 @@ split_metadata = {
         "val": count_seasons_in_pairs(val_pairs, seasons),
         "test": count_seasons_in_pairs(test_pairs, seasons),
     },
+    "split_level": "scene",
+    "scene_counts": {
+        split: len(v) for split, v in scenes_by_split.items()
+    },
+    "scenes": {
+        split: sorted("_".join(k) for k in v)
+        for split, v in scenes_by_split.items()
+    },
 }
 
 with open(os.path.join(output_dir, "split_metadata.json"), "w") as f:
@@ -596,6 +625,8 @@ with open(os.path.join(output_dir, "split_metadata.json"), "w") as f:
 # -------------------- PROCESS, CROP, NORMALIZE, WRITE --------------------
 
 print("\nProcessing, cropping and normalizing into .npy files...")
+
+nonfinite_counts = {"train": 0, "val": 0, "test": 0}
 
 
 def process_split(split):
@@ -614,10 +645,15 @@ def process_split(split):
         y_full = load_tif_as_hwc(s2f)  # S2: expected shape (H, W, 13)
 
         if X_full.shape[-1] != 2 or y_full.shape[-1] != 13:
-            print("Skipping malformed pair:")
+            # Skipping would desync the memmap cursor, so stop here instead.
+            print("ERROR: Malformed pair:")
             print(f"  S1: {s1f}, shape={X_full.shape}")
             print(f"  S2: {s2f}, shape={y_full.shape}")
-            continue
+            sys.exit(1)
+
+        nonfinite_counts[split] += int(
+            (~np.isfinite(X_full)).sum() + (~np.isfinite(y_full)).sum()
+        )
 
         for hh, ww in crop_grid(H, W, CROP_SIZE):
             X_patch = X_full[hh:hh + CROP_SIZE, ww:ww + CROP_SIZE, :]
@@ -631,14 +667,15 @@ def process_split(split):
 
             cur += 1
 
-        del X_full, y_full, X_patch, y_patch, Xn, yn
-        gc.collect()
-
     mmaps[split]["cursor"] = cur
 
 
 for split in ["train", "val", "test"]:
     process_split(split)
+
+print("\nNon-finite source pixels replaced during normalization:")
+for split in ["train", "val", "test"]:
+    print(f"  {split}: {nonfinite_counts[split]}")
 
 
 # -------------------- VALIDATE CURSOR COUNTS --------------------
