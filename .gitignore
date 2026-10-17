@@ -337,3 +337,5 @@ MDPI_template_ACS.zip
 # Large model checkpoints
 *.pt
 *.pth
+.claude/
+.vscode/
