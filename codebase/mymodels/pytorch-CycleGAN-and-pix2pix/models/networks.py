@@ -129,6 +129,21 @@ def init_net(net, init_type="normal", init_gain=0.02):
     return net
 
 
+def apply_spectral_norm(net):
+    """Wrap every Conv2d of <net> in spectral normalization (SNGAN-style Lipschitz constraint).
+
+    Must be applied AFTER weight initialization: spectral_norm renames the parameter to
+    `weight_orig` and turns `weight` into a derived attribute, so any init run afterwards
+    is overwritten on the next forward pass.
+    """
+    for name, child in net.named_children():
+        if isinstance(child, nn.Conv2d):
+            setattr(net, name, nn.utils.spectral_norm(child))
+        else:
+            apply_spectral_norm(child)
+    return net
+
+
 def define_G(input_nc, output_nc, ngf, netG, norm="batch", use_dropout=False, init_type="normal", init_gain=0.02):
     """Create a generator
 
