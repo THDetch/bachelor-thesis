@@ -128,6 +128,10 @@ g_target_real = 1.0
 # How often (in batches) to measure how much of G's gradient comes from D. 0 disables.
 grad_probe_every = 200
 
+# Keep a snapshot every N epochs so post-hoc diagnostics can compare early vs late
+# training. Best-model files alone only ever show the converged state. 0 disables.
+checkpoint_every = 5
+
 
 
 # -----------------------------------------------------------------------------
@@ -333,6 +337,7 @@ config = {
     "batch_size": batch_size,
     "seed": seed,
     "grad_probe_every": grad_probe_every,
+    "checkpoint_every": checkpoint_every,
     "lr_initial_G": lr_G,
     "lr_initial_D": lr_D,
     "use_lr_decay": use_lr_decay,
@@ -1277,6 +1282,12 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     # Save checkpoint and plots every epoch
     # -----------------------------------------------------------------------------
     save_checkpoint(epoch)
+
+    if checkpoint_every > 0 and ((epoch + 1) % checkpoint_every == 0):
+        snap = f"{model_name}_epoch_{epoch + 1:03d}"
+        torch.save(netG.state_dict(), os.path.join(save_dir, f"{snap}_netG.pth"))
+        torch.save(netD.state_dict(), os.path.join(save_dir, f"{snap}_netD.pth"))
+
     save_history_csv()
     save_history_json()
     save_detailed_training_plots()
