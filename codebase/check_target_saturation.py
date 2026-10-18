@@ -20,8 +20,16 @@ import numpy as np
 
 DATA_DIR = "dataset_all_seasons_scenesplit"
 SPLIT = "train"              # train | val | test
-SAMPLES = 500                # patches to sample; set to 0 to scan the whole split
+SAMPLES = 2000               # patches to sample; set to 0 to scan the whole split
 SEED = 42
+
+# Saturation is concentrated in a few snowy/cloudy scenes, so the tail needs more
+# patches than the mean does. Percentiles use a random subsample of pixels per patch.
+PCT_PIXELS_PER_PATCH = 1000
+
+# Bands used for the RGB display window, in (R, G, B) order.
+RGB_BANDS = ("B4", "B3", "B2")
+DISPLAY_PCT = (2.0, 98.0)
 
 # Flag a band above this fraction of saturated pixels.
 WARN_FRACTION = 0.01
@@ -39,6 +47,21 @@ def band_names(n_bands):
     if n_bands == 10:
         return BAND_NAMES_10
     return [f"C{i}" for i in range(n_bands)]
+
+
+def load_clip_ranges(data_dir, n_bands):
+    """Per-band (lo, hi) in DN, in channel order, from S2_clip.json."""
+    path = os.path.join(data_dir, "S2_clip.json")
+    if not os.path.exists(path):
+        return [(0.0, 10000.0)] * n_bands
+    with open(path) as f:
+        clip = json.load(f)
+    keys = sorted(clip, key=lambda k: int(k))
+    return [tuple(clip[k]) for k in keys]
+
+
+def to_dn(x_norm, lo, hi):
+    return lo + (x_norm + 1.0) * 0.5 * (hi - lo)
 
 
 def main():
@@ -63,6 +86,8 @@ def main():
 
     px_per_band = len(idx) * Y.shape[1] * Y.shape[2]
 
+    clip = load_clip_ranges(DATA_DIR, n_bands)
+
     at_lo = np.zeros(n_bands, dtype=np.int64)
     at_hi = np.zeros(n_bands, dtype=np.int64)
     vmin = np.full(n_bands, np.inf)
@@ -70,7 +95,11 @@ def main():
     vsum = np.zeros(n_bands, dtype=np.float64)
     vsq = np.zeros(n_bands, dtype=np.float64)
 
-    for i in idx:
+    k = min(PCT_PIXELS_PER_PATCH, Y.shape[1] * Y.shape[2])
+    pct_pool = np.empty((len(idx) * k, n_bands), dtype=np.float32)
+    pct_rng = np.random.default_rng(SEED + 1)
+
+    for j, i in enumerate(idx):
         a = np.asarray(Y[i], dtype=np.float32).reshape(-1, n_bands)
         at_lo += (a <= -1.0).sum(axis=0)
         at_hi += (a >= 1.0).sum(axis=0)
@@ -78,6 +107,9 @@ def main():
         vmax = np.maximum(vmax, a.max(axis=0))
         vsum += a.sum(axis=0, dtype=np.float64)
         vsq += (a.astype(np.float64) ** 2).sum(axis=0)
+
+        pick = pct_rng.choice(a.shape[0], size=k, replace=False)
+        pct_pool[j * k:(j + 1) * k] = a[pick]
 
     mean = vsum / px_per_band
     std = np.sqrt(np.maximum(0.0, vsq / px_per_band - mean**2))
@@ -103,6 +135,33 @@ def main():
     x0 = np.asarray(X[idx[0]], dtype=np.float32)
     print(f"\nSAR input (first sampled patch): min {x0.min():.4f}  max {x0.max():.4f}")
 
+    # -------------------- percentiles, in DN --------------------
+    qs = [1.0, 2.0, 50.0, 98.0, 99.0]
+    pct_norm = np.percentile(pct_pool, qs, axis=0)          # (len(qs), n_bands)
+    pct_dn = np.empty_like(pct_norm)
+    for c in range(n_bands):
+        lo, hi = clip[c] if c < len(clip) else (0.0, 10000.0)
+        pct_dn[:, c] = to_dn(pct_norm[:, c], lo, hi)
+
+    print(f"\nPer-band percentiles in DN ({pct_pool.shape[0]:,} sampled pixels per band)")
+    print(f"{'band':>5} {'p1':>8} {'p2':>8} {'p50':>8} {'p98':>8} {'p99':>8}")
+    print("-" * 50)
+    for c, name in enumerate(names):
+        print(f"{name:>5} " + " ".join(f"{pct_dn[q, c]:>8.0f}" for q in range(len(qs))))
+
+    # Shared display window for the RGB panels: one window for R, G and B, so the
+    # rendering cannot white-balance away a colour error.
+    lo_q = qs.index(DISPLAY_PCT[0])
+    hi_q = qs.index(DISPLAY_PCT[1])
+    rgb_cols = [names.index(b) for b in RGB_BANDS if b in names]
+    win_lo = float(min(pct_dn[lo_q, c] for c in rgb_cols))
+    win_hi = float(max(pct_dn[hi_q, c] for c in rgb_cols))
+    win = (round(win_lo / 50) * 50, round(win_hi / 50) * 50)
+
+    print(f"\nSuggested fixed RGB display window ({'/'.join(RGB_BANDS)}, "
+          f"p{DISPLAY_PCT[0]:g}-p{DISPLAY_PCT[1]:g} over the {SPLIT} split):")
+    print(f"  FIXED_STRETCH_DN = {win}")
+
     print()
     if flagged:
         print(f"FLAGGED (> {WARN_FRACTION:.0%} of pixels at a clip bound): {', '.join(flagged)}")
@@ -115,7 +174,15 @@ def main():
         "split": SPLIT,
         "sampled_patches": int(len(idx)),
         "pixels_per_band": int(px_per_band),
+        "percentile_pixels_per_band": int(pct_pool.shape[0]),
         "warn_fraction": WARN_FRACTION,
+        "display_window_dn": list(win),
+        "display_window_bands": list(RGB_BANDS),
+        "display_window_percentiles": list(DISPLAY_PCT),
+        "percentiles_dn": {
+            name: {f"p{q:g}": float(pct_dn[qi, c]) for qi, q in enumerate(qs)}
+            for c, name in enumerate(names)
+        },
         "bands": {
             name: {
                 "frac_at_minus_one": float(frac_lo[c]),
