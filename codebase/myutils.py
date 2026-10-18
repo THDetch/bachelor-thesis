@@ -34,6 +34,10 @@ S2_DISPLAY_WINDOWS_DN = {
     1: (700.0, 2100.0),   # B2 blue
 }
 
+# Reflectance is strongly right-skewed: the median sits only ~20% of the way from p2 to
+# p98, so a linear window renders every panel dark. Matches the inference scripts.
+S2_DISPLAY_GAMMA = 1.0 / 2.2
+
 
 class NPYPairDataset(Dataset):
     """Memory-mapped (X, y) pairs.
@@ -279,14 +283,16 @@ def percentile_limits_np(arr: np.ndarray, p_low: float = 2.0, p_high: float = 98
     return float(lo), float(hi)
 
 
-def apply_stretch_np(arr: np.ndarray, limits) -> np.ndarray:
-    """Scale to uint8 using explicit (lo, hi) limits."""
+def apply_stretch_np(arr: np.ndarray, limits, gamma=None) -> np.ndarray:
+    """Scale to uint8 using explicit (lo, hi) limits, with optional gamma."""
     a = arr.astype(np.float32)
     finite = np.isfinite(a)
     if limits is None:
         return np.zeros_like(a, dtype=np.uint8)
     lo, hi = limits
     scaled = (np.clip(a, lo, hi) - lo) / (hi - lo)
+    if gamma is not None:
+        scaled = np.power(scaled, gamma)
     scaled = (scaled * 255.0).round().astype(np.uint8)
     scaled[~finite] = 0
     return scaled
@@ -425,8 +431,8 @@ def _s2_pair_to_rgb_shared(pred_nhwc: torch.Tensor, target_nhwc: torch.Tensor, r
 
         for i in range(N):
             limits = fixed or percentile_limits_np(t_np[i])
-            pred_out[i, ..., ch] = apply_stretch_np(p_np[i], limits)
-            tgt_out[i, ..., ch] = apply_stretch_np(t_np[i], limits)
+            pred_out[i, ..., ch] = apply_stretch_np(p_np[i], limits, gamma=S2_DISPLAY_GAMMA)
+            tgt_out[i, ..., ch] = apply_stretch_np(t_np[i], limits, gamma=S2_DISPLAY_GAMMA)
 
     return pred_out, tgt_out
 
