@@ -1,6 +1,6 @@
 import os, numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 from PIL import Image
 
@@ -24,26 +24,113 @@ S2_CLIP = {
 }
 
 
-def get_train_val_loaders(train_data_folder, val_data_folder, batch_size, channel_select=None):
-    X_train_scaled = np.load(os.path.join(train_data_folder, 'X_train.npy'))
-    y_train_scaled = np.load(os.path.join(train_data_folder, 'y_train.npy'))
-    X_val_scaled = np.load(os.path.join(val_data_folder, 'X_val.npy'))
-    y_val_scaled = np.load(os.path.join(val_data_folder, 'y_val.npy'))
+class NPYPairDataset(Dataset):
+    """Memory-mapped (X, y) pairs.
+
+    Loading the arrays outright costs ~100 GB resident and roughly twice that during the
+    numpy-to-tensor copy. Memory mapping leaves the pages to the OS cache instead.
+    """
+
+    def __init__(self, x_path, y_path, channel_select=None):
+        self.x_path = x_path
+        self.y_path = y_path
+        self.channel_select = channel_select
+
+        X = np.load(x_path, mmap_mode="r")
+        Y = np.load(y_path, mmap_mode="r")
+
+        if len(X) != len(Y):
+            raise ValueError(f"Length mismatch: {x_path} has {len(X)}, {y_path} has {len(Y)}")
+
+        self._len = len(X)
+        self.x_shape = tuple(X.shape)
+        self.y_shape = tuple(Y.shape)
+
+        del X, Y
+
+        # Opened on first access so each DataLoader worker gets its own handle.
+        self.X = None
+        self.Y = None
+
+    def __len__(self):
+        return self._len
+
+    def _ensure_open(self):
+        if self.X is None:
+            self.X = np.load(self.x_path, mmap_mode="r")
+            self.Y = np.load(self.y_path, mmap_mode="r")
+
+    def __getitem__(self, idx):
+        self._ensure_open()
+
+        x = self.X[idx]
+        y = self.Y[idx]
+
+        if self.channel_select is not None:
+            x = x[..., self.channel_select:self.channel_select + 1]
+
+        return (
+            torch.from_numpy(np.asarray(x, dtype=np.float32)),
+            torch.from_numpy(np.asarray(y, dtype=np.float32)),
+        )
+
+
+def _sampled_range(path, n=32):
+    """Range over the first n patches; a full min/max would read the whole file."""
+    arr = np.load(path, mmap_mode="r")
+    sub = np.asarray(arr[: min(n, arr.shape[0])], dtype=np.float32)
+    return float(sub.min()), float(sub.max())
+
+
+def get_train_val_loaders(
+    train_data_folder,
+    val_data_folder,
+    batch_size,
+    channel_select=None,
+    drop_last=False,
+    num_workers=16,
+):
+    train_dataset = NPYPairDataset(
+        os.path.join(train_data_folder, "X_train.npy"),
+        os.path.join(train_data_folder, "y_train.npy"),
+        channel_select=channel_select,
+    )
+
+    val_dataset = NPYPairDataset(
+        os.path.join(val_data_folder, "X_val.npy"),
+        os.path.join(val_data_folder, "y_val.npy"),
+        channel_select=channel_select,
+    )
+
+    y_train_lo, y_train_hi = _sampled_range(os.path.join(train_data_folder, "y_train.npy"))
+    y_val_lo, y_val_hi = _sampled_range(os.path.join(val_data_folder, "y_val.npy"))
+
     print("\nData validation:")
-    print(f"y_train range: [{y_train_scaled.min()}, {y_train_scaled.max()}]")
-    print(f"y_val range: [{y_val_scaled.min()}, {y_val_scaled.max()}]") 
-    
+    print(f"train: X {train_dataset.x_shape}  y {train_dataset.y_shape}")
+    print(f"val:   X {val_dataset.x_shape}  y {val_dataset.y_shape}")
+    print(f"y_train sampled range: [{y_train_lo}, {y_train_hi}]")
+    print(f"y_val sampled range: [{y_val_lo}, {y_val_hi}]")
+
     if channel_select is not None:
         print(f"Selecting channel {channel_select} from input data.")
-        X_train_scaled = X_train_scaled[..., channel_select:channel_select+1]
-        X_val_scaled = X_val_scaled[..., channel_select:channel_select+1]
-        
-    print("X_train_scaled.shape:", X_train_scaled.shape)
-    # Convert to PyTorch datasets
-    train_dataset = TensorDataset(torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train_scaled))
-    val_dataset = TensorDataset(torch.FloatTensor(X_val_scaled),torch.FloatTensor(y_val_scaled))
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=16, pin_memory=True)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=drop_last,
+        persistent_workers=num_workers > 0,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
 
     return train_loader, val_loader
 
