@@ -21,10 +21,15 @@ from mymodels.cp2pwrapper import Pix2PixWrapper  # must exist
 
 
 # ---------- Defaults ----------
-DEFAULT_DATA_DIR = "dataset_all_seasons"
-DEFAULT_RESULTS_DIR = "trained_all_seasons_debugged_loss_balance_label_smoothing/generated"
-DEFAULT_MODEL_DIR = "trained_all_seasons_debugged_loss_balance_label_smoothing/pix2pix"
+RUN_NAME = "baseline_scenesplit_sn"
+
+DEFAULT_DATA_DIR = "dataset_all_seasons_scenesplit"
+DEFAULT_RESULTS_DIR = f"trained_{RUN_NAME}/generated"
+DEFAULT_MODEL_DIR = f"trained_{RUN_NAME}/pix2pix"
 DEFAULT_MODEL_FILE = "pix2pix_best_netG.pth"
+
+# Must match norm_G in the training script, or load_state_dict will fail.
+NORM_G = "batch"
 
 
 # ---------- S2 inverse using clip JSON ----------
@@ -141,7 +146,7 @@ def load_model(model_dir, model_file, in_ch, out_ch, img_size, device):
     mp = Path(model_dir) / model_file
     if not mp.exists():
         raise FileNotFoundError(f"Model not found: {mp}")
-    model = Pix2PixWrapper(in_channels=in_ch, out_channels=out_ch, img_size=img_size, norm="instance")
+    model = Pix2PixWrapper(in_channels=in_ch, out_channels=out_ch, img_size=img_size, norm=NORM_G)
     # safer load (PyTorch >= 2.4); if your torch is older, drop weights_only
     try:
         state = torch.load(str(mp), map_location=device, weights_only=True)

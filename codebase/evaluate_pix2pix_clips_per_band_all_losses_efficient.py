@@ -21,15 +21,31 @@ from pathlib import Path
 gpu_id = 0
 input_channel_select = None  # 0, 1, or None (all)
 models_to_run = ["pix2pix"]
-# DATA_DIR = "dataset_cr_winter_test"
-MODEL_DIR = "trained_all_seasons_debugged_loss_balance_label_smoothing"
 
-DATA_DIR = "/home/dll1801/mdpi_manuscript/code/bachelor-thesis/codebase/dataset_all_seasons"
-# DATA_DIR = "/home/dll0505/AdditionalStorage/thesis/sen12-ms-cr/dataset_winter_all"
+RUN_NAME = "baseline_scenesplit_sn"
+MODEL_DIR = f"trained_{RUN_NAME}"
+DATA_DIR = "dataset_all_seasons_scenesplit"
 RESULTS_DIR = f"{MODEL_DIR}/evaluation"
 
+# Must match norm_G in the training script, or load_state_dict will fail.
+NORM_G = "batch"
 
-# RESULTS_DIR = f"{MODEL_DIR}/cr_evaluation_summer_band_all_losses_"
+# ----------------------
+# Metric spec
+# ----------------------
+# Fixed on purpose. Deriving the data range from the test set makes runs, bands and
+# datasets incomparable, and silently differs between aggregate and per-band numbers.
+# Sentinel-2 L1C reflectance is scaled by 1e4, so the nominal range is [0, 10000] DN.
+#
+#   PSNR  : pooled over the whole split, MAX = PSNR_MAX, in DN space
+#   SSIM  : skimage structural_similarity, default 7x7 uniform window, data_range fixed
+#   NRMSE : RMSE / std(band) of the reference; 1.0 means "no better than the band mean"
+#   R2    : 1 - MSE/var(band); <= 0 means worse than predicting the per-band mean
+#   SAM   : reflectance space, degrees, mean over pixels
+#   LPIPS : AlexNet backbone, RGB = B4/B3/B2, averaged weighted by batch size
+PSNR_MAX = 10000.0
+SSIM_DATA_RANGE = 10000.0
+
 os.makedirs(RESULTS_DIR, exist_ok=True)
 batch_size = 16
 
@@ -354,7 +370,7 @@ def main():
         {
             'model_class': Pix2PixWrapper,
             'model_name': 'pix2pix',
-            'params': {'in_channels': C_in, 'out_channels': C_out, 'img_size': H, 'norm': "instance"},
+            'params': {'in_channels': C_in, 'out_channels': C_out, 'img_size': H, 'norm': NORM_G},
             'model_file': 'pix2pix_best_netG.pth'
         }
     ]
@@ -409,6 +425,8 @@ def main():
         # Per-channel sums for original-units errors
         abs_sum_c = np.zeros(C_out, dtype=np.float64)
         sq_sum_c  = np.zeros(C_out, dtype=np.float64)
+        truth_sum_c = np.zeros(C_out, dtype=np.float64)
+        truth_sq_c  = np.zeros(C_out, dtype=np.float64)
         count_c   = 0  # number of pixels per channel
 
         # Global min/max (truth) for overall PSNR data_range
@@ -419,8 +437,9 @@ def main():
         band_min = np.full(C_out, np.inf, dtype=np.float64)
         band_max = np.full(C_out, -np.inf, dtype=np.float64)
 
-        # LPIPS (mean over batches)
-        lpips_vals = []
+        # LPIPS (batch-size weighted so a short final batch is not over-counted)
+        lpips_sum = 0.0
+        lpips_count = 0
 
         # SAM accumulator (exact mean + approx quantiles)
         sam_acc = SAMAccumulator(sample_cap=2_000_000, rng_seed=123)
@@ -451,12 +470,15 @@ def main():
                 d = yt - yp
                 abs_sum_c += np.abs(d).sum(axis=0)
                 sq_sum_c  += (d * d).sum(axis=0)
+                truth_sum_c += yt.sum(axis=0)
+                truth_sq_c  += (yt * yt).sum(axis=0)
                 count_c   += yt.shape[0]
 
                 # LPIPS (optional)
                 if lpips_fn is not None:
                     lp = compute_lpips_rgb_batchwise(truth, preds, s2_clip, device, lpips_fn, bs=8)
-                    lpips_vals.append(lp)
+                    lpips_sum += lp * truth.shape[0]
+                    lpips_count += truth.shape[0]
 
                 # SAM streaming update
                 sam_acc.update_batch(truth, preds, sample_stride=None)
@@ -466,12 +488,23 @@ def main():
         mse_c  = sq_sum_c  / max(1, count_c)               # per-channel MSE
         mae_all  = float(np.mean(mae_c))                   # uniform_average
         rmse_all = float(np.sqrt(np.mean(mse_c)))          # sqrt(mean per-channel MSE)
-        data_range = max(0.0, global_max - global_min)
-        psnr_all = psnr_from_mse(float(np.mean(mse_c)), data_range)  # same MSE as RMSE
+        observed_range = max(0.0, global_max - global_min)
+        psnr_all = psnr_from_mse(float(np.mean(mse_c)), PSNR_MAX)
 
-        # --- SSIM (overall & per-band) with fixed global data_range(s) ---
-        global_dr = max(1e-9, data_range)
-        band_dr   = np.maximum(1e-9, (band_max - band_min))  # per-band data_range
+        # Reference spread per band, for NRMSE / R2
+        truth_mean_c = truth_sum_c / max(1, count_c)
+        truth_var_c  = np.maximum(0.0, truth_sq_c / max(1, count_c) - truth_mean_c ** 2)
+        truth_std_c  = np.sqrt(truth_var_c)
+
+        nrmse_per = (np.sqrt(mse_c) / np.maximum(1e-9, truth_std_c)).astype(float).tolist()
+        r2_per    = (1.0 - mse_c / np.maximum(1e-9, truth_var_c)).astype(float).tolist()
+
+        logging.info(f"Observed reference range: {global_min:.1f}..{global_max:.1f} DN "
+                     f"(metrics use the fixed spec: PSNR_MAX={PSNR_MAX}, SSIM_DATA_RANGE={SSIM_DATA_RANGE})")
+
+        # --- SSIM (overall & per-band) on the same fixed data_range ---
+        global_dr = SSIM_DATA_RANGE
+        band_dr   = np.full(C_out, SSIM_DATA_RANGE, dtype=np.float64)
 
         ssim_sum = 0.0
         ssim_count = 0
@@ -512,10 +545,9 @@ def main():
 
         # --- Per-band MAE/RMSE/PSNR (original units) ---
         rmse_per = np.sqrt(mse_c).astype(float).tolist()
-        # PSNR per band uses per-band MSE and per-band data_range
         psnr_per = []
         for c in range(C_out):
-            psnr_per.append(psnr_from_mse(float(mse_c[c]), float(band_dr[c])))
+            psnr_per.append(psnr_from_mse(float(mse_c[c]), PSNR_MAX))
 
         # --- Normalized-space metrics ([-1,1]) – sklearn-equivalent ---
         abs_norm_c = np.zeros(C_out, dtype=np.float64)
@@ -541,7 +573,7 @@ def main():
         rmse_norm = float(np.sqrt(np.mean(mse_norm_c)))   # sqrt(mean per-channel MSE)
 
         # --- LPIPS mean ---
-        lpips_rgb_mean = float(np.mean(lpips_vals)) if lpips_vals else None
+        lpips_rgb_mean = (lpips_sum / lpips_count) if lpips_count > 0 else None
         if lpips_rgb_mean is not None:
             logging.info(f"  LPIPS_RGB: {lpips_rgb_mean:.6f}")
         else:
@@ -565,6 +597,8 @@ def main():
         # --- Group summaries (from per-band ORIGINAL) ---
         perband_dict = {"MAE": mae_c.astype(float).tolist(),
                         "RMSE": rmse_per,
+                        "NRMSE": nrmse_per,
+                        "R2": r2_per,
                         "PSNR": psnr_per,
                         "SSIM": ssim_per}
         group_summary = group_metrics_from_perband(perband_dict)
@@ -588,6 +622,7 @@ def main():
         for c, name in enumerate(BAND_NAMES):
             logging.info(
                 f"  {name:>4} | MAE {mae_c[c]:8.3f} | RMSE {rmse_per[c]:8.3f} | "
+                f"NRMSE {nrmse_per[c]:6.3f} | R2 {r2_per[c]:7.3f} | "
                 f"PSNR {psnr_per[c]:7.3f} | SSIM {ssim_per[c]:.4f}"
             )
 
@@ -611,7 +646,7 @@ def main():
             w.writerow(overall_row)
 
         # Per-band CSV
-        perband_headers = ["model","band","MAE","RMSE","PSNR","SSIM","MAE_norm","RMSE_norm"]
+        perband_headers = ["model","band","MAE","RMSE","NRMSE","R2","PSNR","SSIM","MAE_norm","RMSE_norm"]
         write_header_band = not os.path.exists(perband_csv)
         with open(perband_csv, "a", newline="") as f:
             w = csv.writer(f)
@@ -620,7 +655,8 @@ def main():
             for c, name in enumerate(BAND_NAMES):
                 w.writerow([
                     model_name, name,
-                    float(mae_c[c]), float(rmse_per[c]), float(psnr_per[c]), float(ssim_per[c]),
+                    float(mae_c[c]), float(rmse_per[c]), float(nrmse_per[c]), float(r2_per[c]),
+                    float(psnr_per[c]), float(ssim_per[c]),
                     float(mae_norm_per[c]), float(rmse_norm_per[c])
                 ])
         logging.info(f"S2_clip (first 3): {list(s2_clip.items())[:3]}  (expect 0..10000)")
