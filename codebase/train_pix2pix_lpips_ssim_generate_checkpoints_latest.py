@@ -66,13 +66,21 @@ lr_G = 1e-4
 lr_D = 1e-4
 # lr_D = 2.5e-5  # D uses half of G learning rate
 
+# -----------------------------------------------------------------------------
+# Warmup and update ratio
+# -----------------------------------------------------------------------------
+warmup_g_only_epochs = 0  # train only G for first 10 epochs
+g_steps_per_iter = 1       # after warmup: G updates per batch
+d_steps_per_iter = 1       # after warmup: D updates per batch
+
+
 # Scheduler / LR decay configuration
 use_lr_decay = True          # Set False to train without any LR decay
 lr_decay_patience = 10       # Plateau patience for both G and D
 lr_decay_factor = 0.5
 lr_min = 1e-6
 decay_after_warmup_only = True  # Avoid decaying D before it even starts training
-decay_starting_epoch = 20
+decay_starting_epoch = warmup_g_only_epochs
 # If you resume from an old checkpoint and want to force both optimizers to a new LR,
 # set this to a float, e.g. 5e-5. Leave as None for normal checkpoint resume.
 set_lrs_on_resume  = None
@@ -82,13 +90,6 @@ data_dir = "dataset_all_seasons"
 model_name = "pix2pix"
 save_dir = f"trained_all_seasons_debugged_loss_original_label_smoothing/{model_name}"
 
-
-# -----------------------------------------------------------------------------
-# Warmup and update ratio
-# -----------------------------------------------------------------------------
-warmup_g_only_epochs = 0  # train only G for first 10 epochs
-g_steps_per_iter = 1       # after warmup: G updates per batch
-d_steps_per_iter = 1       # after warmup: D updates per batch
 
 
 # -----------------------------------------------------------------------------
