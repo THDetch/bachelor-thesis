@@ -17,9 +17,11 @@ import sys
 import time
 import json
 import csv
+import random
 import logging
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
@@ -47,7 +49,24 @@ else:
     device = torch.device("cpu")
     print("Using device: CPU")
 
-torch.backends.cudnn.benchmark = True  # faster on fixed-size tensors
+
+# -----------------------------------------------------------------------------
+# Reproducibility
+# -----------------------------------------------------------------------------
+seed = 42
+
+
+def set_seed(s: int):
+    random.seed(s)
+    np.random.seed(s)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
+    # Costs throughput, but config comparisons are meaningless without it.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+set_seed(seed)
 
 
 # -----------------------------------------------------------------------------
@@ -63,32 +82,51 @@ batch_size = 16
 
 # Separate learning rates
 lr_G = 1e-4
-lr_D = 1e-4
-# lr_D = 2.5e-5  # D uses half of G learning rate
+lr_D = 5e-5   # D was winning outright; handicap it
 
 # -----------------------------------------------------------------------------
 # Warmup and update ratio
 # -----------------------------------------------------------------------------
-warmup_g_only_epochs = 0  # train only G for first 10 epochs
+warmup_g_only_epochs = 0  # train only G for first N epochs
 g_steps_per_iter = 1       # after warmup: G updates per batch
 d_steps_per_iter = 1       # after warmup: D updates per batch
 
 
 # Scheduler / LR decay configuration
-use_lr_decay = True          # Set False to train without any LR decay
+# Off for the stability baseline: a decaying LR would confound the D/G dynamics.
+use_lr_decay = False
 lr_decay_patience = 10       # Plateau patience for both G and D
 lr_decay_factor = 0.5
 lr_min = 1e-6
 decay_after_warmup_only = True  # Avoid decaying D before it even starts training
 decay_starting_epoch = warmup_g_only_epochs
 # If you resume from an old checkpoint and want to force both optimizers to a new LR,
-# set this to a float, e.g. 5e-5. Leave as None for normal checkpoint resume.
+# set this to 5e-5, or to {"G": 5e-5, "D": 2.5e-5}. Leave as None for normal checkpoint resume.
 set_lrs_on_resume  = None
 
-data_dir = "dataset_all_seasons"
+# A stale checkpoint with epoch + 1 >= epochs makes the training loop a silent no-op.
+allow_resume = False
+
+data_dir = "dataset_all_seasons_scenesplit"
 
 model_name = "pix2pix"
-save_dir = f"trained_all_seasons_debugged_loss_original_label_smoothing/{model_name}"
+run_name = "baseline_scenesplit_sn"
+save_dir = f"trained_{run_name}/{model_name}"
+
+
+# -----------------------------------------------------------------------------
+# Network configuration
+# -----------------------------------------------------------------------------
+norm_G = "batch"      # InstanceNorm strips the per-image radiometric level we regress
+norm_D = "instance"   # "none" would silently disable conv bias in NLayerDiscriminator
+use_spectral_norm = True
+
+# One-sided label smoothing belongs to D only; smoothing G's target caps its objective.
+d_target_real = 0.9
+g_target_real = 1.0
+
+# How often (in batches) to measure how much of G's gradient comes from D. 0 disables.
+grad_probe_every = 200
 
 
 
@@ -151,6 +189,7 @@ train_loader, val_loader = get_train_val_loaders(
     val_data_folder=data_dir,
     batch_size=batch_size,
     channel_select=input_channel_select,
+    drop_last=True,   # a ragged final batch gives noisy BatchNorm statistics
 )
 
 monitor_batch_X, monitor_batch_y = next(iter(val_loader))
@@ -176,7 +215,7 @@ print(f"Output channels: {channels_out}")
 
 
 from mymodels.cp2pwrapper import Pix2PixWrapper
-from models.networks import define_D, GANLoss
+from models.networks import define_D, GANLoss, init_net, apply_spectral_norm
 
 
 # -----------------------------------------------------------------------------
@@ -186,15 +225,22 @@ netG = Pix2PixWrapper(
     in_channels=channels_in,
     out_channels=channels_out,
     img_size=height,
-    norm = "instance"
+    norm=norm_G,
 ).to(device)
 
+# define_D does not initialize; this fork initializes at the call site (see base_model.setup).
 netD = define_D(
     input_nc=channels_in + channels_out,
     ndf=64,
     netD="basic",
-    norm = "instance",
-).to(device)
+    norm=norm_D,
+)
+netD = init_net(netD, init_type="normal", init_gain=0.02)
+
+if use_spectral_norm:
+    netD = apply_spectral_norm(netD)
+
+netD = netD.to(device)
 
 
 # -----------------------------------------------------------------------------
@@ -202,7 +248,14 @@ netD = define_D(
 # -----------------------------------------------------------------------------
 # def __init__(self, gan_mode, target_real_label=1.0, target_fake_label=0.0):
 
-criterionGAN = GANLoss(gan_mode="lsgan", target_real_label=0.9, target_fake_label=0.0).to(device)
+criterionGAN_D = GANLoss(
+    gan_mode="lsgan", target_real_label=d_target_real, target_fake_label=0.0
+).to(device)
+
+criterionGAN_G = GANLoss(
+    gan_mode="lsgan", target_real_label=g_target_real, target_fake_label=0.0
+).to(device)
+
 criterionL1 = torch.nn.L1Loss()
 
 ssim = None
@@ -278,6 +331,8 @@ logger = logging.getLogger()
 config = {
     "epochs": epochs,
     "batch_size": batch_size,
+    "seed": seed,
+    "grad_probe_every": grad_probe_every,
     "lr_initial_G": lr_G,
     "lr_initial_D": lr_D,
     "use_lr_decay": use_lr_decay,
@@ -286,9 +341,16 @@ config = {
     "lr_min": lr_min,
     "decay_after_warmup_only": decay_after_warmup_only,
     "scheduler_metric": scheduler_metric,
+    "allow_resume": allow_resume,
     "data_dir": data_dir,
     "model_name": model_name,
+    "run_name": run_name,
     "save_dir": save_dir,
+    "norm_G": norm_G,
+    "norm_D": norm_D,
+    "use_spectral_norm": use_spectral_norm,
+    "d_target_real": d_target_real,
+    "g_target_real": g_target_real,
     "warmup_g_only_epochs": warmup_g_only_epochs,
     "param_count_G": param_count_G,
     "param_count_D": param_count_D,
@@ -333,6 +395,11 @@ history = {
     "train_D_loss": [],
     "train_D_real": [],
     "train_D_fake": [],
+    "train_D_out_real": [],
+    "train_D_out_fake": [],
+
+    # How much of G's gradient comes from the adversarial term
+    "train_gan_l1_grad_ratio": [],
 
     # Validation
     "val_L1": [],
@@ -374,6 +441,12 @@ def save_checkpoint(epoch_idx: int):
         "best_val_total": best_val_total,
         "history": history,
         "config": config,
+        "rng_state": {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        },
     }
 
     torch.save(ckpt, checkpoint_path)
@@ -416,15 +489,30 @@ def try_resume():
 
     start_epoch = ckpt.get("epoch", -1) + 1
 
+    rng = ckpt.get("rng_state")
+    if rng is not None:
+        # map_location moved these to the GPU; the setters expect CPU tensors.
+        random.setstate(rng["python"])
+        np.random.set_state(rng["numpy"])
+        torch.set_rng_state(rng["torch"].cpu())
+        if rng.get("cuda") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([s.cpu() for s in rng["cuda"]])
+
     print(f"[RESUME] Resuming at epoch {start_epoch + 1} of {epochs}")
 
 
-try_resume()
+if allow_resume:
+    try_resume()
+else:
+    print("[RESUME] Disabled by config (allow_resume=False). Starting fresh.")
 
 # Optional: force both G and D to the same LR after resume.
 if set_lrs_on_resume is not None and start_epoch > 0:
-    forced_lr_G = set_lrs_on_resume["G"]
-    forced_lr_D = set_lrs_on_resume["D"]
+    if isinstance(set_lrs_on_resume, dict):
+        forced_lr_G = set_lrs_on_resume["G"]
+        forced_lr_D = set_lrs_on_resume["D"]
+    else:
+        forced_lr_G = forced_lr_D = float(set_lrs_on_resume)
 
     for pg in optimizer_G.param_groups:
         pg["lr"] = forced_lr_G
@@ -559,6 +647,34 @@ def save_detailed_training_plots():
     plot_curve(
         x,
         [
+            history["train_D_out_real"],
+            history["train_D_out_fake"],
+        ],
+        [
+            "D(real)",
+            "D(fake)",
+        ],
+        "Discriminator Raw Output (collapse: D(fake) -> 0)",
+        "Mean D output",
+        "discriminator_outputs.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["train_gan_l1_grad_ratio"],
+        ],
+        [
+            "||grad GAN|| / ||grad L1||",
+        ],
+        "Share of G Gradient Coming From the Discriminator",
+        "Gradient norm ratio",
+        "gan_l1_gradient_ratio.png",
+    )
+
+    plot_curve(
+        x,
+        [
             history["train_G_L1_raw"],
             history["val_L1"],
         ],
@@ -645,6 +761,8 @@ def save_best_models(metric_name):
 # -----------------------------------------------------------------------------
 # Training loop
 # -----------------------------------------------------------------------------
+global_step = 0
+
 for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", position=0):
     epoch_start = time.time()
 
@@ -666,6 +784,11 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     train_D_loss_sum = 0.0
     train_D_real_sum = 0.0
     train_D_fake_sum = 0.0
+    train_D_out_real_sum = 0.0
+    train_D_out_fake_sum = 0.0
+
+    grad_ratio_sum = 0.0
+    grad_ratio_count = 0
 
     num_samples_seen = 0
 
@@ -683,6 +806,10 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
             bsz = real_A.size(0)
             num_samples_seen += bsz
+            global_step += 1
+
+            # One generator forward per iteration; D consumes a detached copy.
+            fake_B = netG(real_A)
 
             loss_D = torch.tensor(0.0, device=device)
             loss_D_real = torch.tensor(0.0, device=device)
@@ -697,12 +824,17 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                 running_D_loss = 0.0
                 running_D_real = 0.0
                 running_D_fake = 0.0
+                running_D_out_real = 0.0
+                running_D_out_fake = 0.0
 
-                for _ in range(d_steps_per_iter):
+                for d_step in range(d_steps_per_iter):
                     optimizer_D.zero_grad()
 
-                    with torch.no_grad():
-                        fake_B_detached = netG(real_A)
+                    if d_step == 0:
+                        fake_B_detached = fake_B.detach()
+                    else:
+                        with torch.no_grad():
+                            fake_B_detached = netG(real_A)
 
                     pred_real = netD(
                         torch.cat((real_A, real_B), -1).permute(0, 3, 1, 2)
@@ -712,8 +844,8 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                         torch.cat((real_A, fake_B_detached), -1).permute(0, 3, 1, 2)
                     )
 
-                    loss_D_real = criterionGAN(pred_real, True)
-                    loss_D_fake = criterionGAN(pred_fake, False)
+                    loss_D_real = criterionGAN_D(pred_real, True)
+                    loss_D_fake = criterionGAN_D(pred_fake, False)
                     loss_D = 0.5 * (loss_D_real + loss_D_fake)
 
                     loss_D.backward()
@@ -722,20 +854,28 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                     running_D_loss += loss_D.item()
                     running_D_real += loss_D_real.item()
                     running_D_fake += loss_D_fake.item()
+                    running_D_out_real += pred_real.mean().item()
+                    running_D_out_fake += pred_fake.mean().item()
 
                 avg_D_loss = running_D_loss / d_steps_per_iter
                 avg_D_real = running_D_real / d_steps_per_iter
                 avg_D_fake = running_D_fake / d_steps_per_iter
+                avg_D_out_real = running_D_out_real / d_steps_per_iter
+                avg_D_out_fake = running_D_out_fake / d_steps_per_iter
 
                 train_D_loss_sum += avg_D_loss * bsz
                 train_D_real_sum += avg_D_real * bsz
                 train_D_fake_sum += avg_D_fake * bsz
+                train_D_out_real_sum += avg_D_out_real * bsz
+                train_D_out_fake_sum += avg_D_out_fake * bsz
 
             else:
                 set_requires_grad(netD, False)
                 avg_D_loss = 0.0
                 avg_D_real = 0.0
                 avg_D_fake = 0.0
+                avg_D_out_real = 0.0
+                avg_D_out_fake = 0.0
 
             # ---------------------------
             # (2) Generator updates
@@ -751,10 +891,12 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
             running_LPIPS_loss = 0.0
             running_LPIPS_metric = 0.0
 
-            for _ in range(max(1, g_steps_per_iter)):
+            for g_step in range(max(1, g_steps_per_iter)):
                 optimizer_G.zero_grad()
 
-                fake_B = netG(real_A)
+                # Extra G steps need a fresh graph; the first reuses the forward above.
+                if g_step > 0:
+                    fake_B = netG(real_A)
 
                 # During G-only warmup, do NOT use GAN loss against a random/frozen D.
                 if g_only:
@@ -763,7 +905,7 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                     pred_fake = netD(
                         torch.cat((real_A, fake_B), -1).permute(0, 3, 1, 2)
                     )
-                    loss_G_GAN = criterionGAN(pred_fake, True)
+                    loss_G_GAN = criterionGAN_G(pred_fake, True)
 
                 loss_G_L1_raw = criterionL1(fake_B, real_B)
                 loss_G_L1_weighted = loss_G_L1_raw * lambda_L1
@@ -794,6 +936,24 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                     loss_LPIPS = lpips_val_for_log * lambda_lpips
 
                 loss_G = lambda_GAN * loss_G_GAN + loss_G_L1_weighted + loss_SSIM + loss_LPIPS
+
+                # Probe before backward: a pinned GAN loss can still look large while
+                # contributing almost no gradient. autograd.grad does not touch .grad.
+                if (
+                    not g_only
+                    and grad_probe_every > 0
+                    and global_step % grad_probe_every == 0
+                ):
+                    grad_gan = torch.autograd.grad(
+                        lambda_GAN * loss_G_GAN, fake_B, retain_graph=True
+                    )[0].norm().item()
+
+                    grad_l1 = torch.autograd.grad(
+                        loss_G_L1_weighted, fake_B, retain_graph=True
+                    )[0].norm().item()
+
+                    grad_ratio_sum += grad_gan / (grad_l1 + 1e-12)
+                    grad_ratio_count += 1
 
                 loss_G.backward()
                 optimizer_G.step()
@@ -850,6 +1010,7 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                 {
                     "G": f"{avg_G_total:.3f}",
                     "D": f"{avg_D_loss:.3f}",
+                    "D(f)": f"{avg_D_out_fake:.3f}",
                     "GAN": f"{avg_G_GAN:.3f}",
                     "L1": f"{avg_G_L1_weighted:.3f}",
                     "SSIM": f"{avg_SSIM_loss:.3f}" if use_ssim else "off",
@@ -886,6 +1047,12 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     train_D_loss = train_D_loss_sum / n_train
     train_D_real = train_D_real_sum / n_train
     train_D_fake = train_D_fake_sum / n_train
+    train_D_out_real = train_D_out_real_sum / n_train
+    train_D_out_fake = train_D_out_fake_sum / n_train
+
+    train_grad_ratio = (
+        grad_ratio_sum / grad_ratio_count if grad_ratio_count > 0 else None
+    )
 
 
     # -----------------------------------------------------------------------------
@@ -993,6 +1160,9 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     history["train_D_loss"].append(train_D_loss)
     history["train_D_real"].append(train_D_real)
     history["train_D_fake"].append(train_D_fake)
+    history["train_D_out_real"].append(train_D_out_real)
+    history["train_D_out_fake"].append(train_D_out_fake)
+    history["train_gan_l1_grad_ratio"].append(train_grad_ratio)
 
     history["val_L1"].append(val_l1)
     history["val_SSIM"].append(val_ssim)
@@ -1019,6 +1189,8 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
         f"D: {train_D_loss:.6f} | "
         f"D_real: {train_D_real:.6f} | "
         f"D_fake: {train_D_fake:.6f} | "
+        f"D_out_real: {train_D_out_real:.4f} | "
+        f"D_out_fake: {train_D_out_fake:.4f} | "
         f"Val L1: {val_l1:.6f} | "
         f"Val total: {val_total:.6f} | "
         f"LR_G: {current_lr_G:.2e} | "
@@ -1030,6 +1202,9 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
     if val_lpips is not None:
         summary += f" | Val LPIPS: {val_lpips:.4f}"
+
+    if train_grad_ratio is not None:
+        summary += f" | GAN/L1 grad: {train_grad_ratio:.4f}"
 
     tqdm.write("\n" + summary)
     logger.info(summary)
