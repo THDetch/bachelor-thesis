@@ -23,6 +23,17 @@ S2_CLIP = {
     13:(0.0, 10000.0),
 }
 
+# Fixed display windows in DN, keyed by 0-based band index, measured as p2-p98 over the
+# 25,697-patch training split (see saturation_train_25697.json). Per channel rather than
+# one shared window because blue sits much higher and narrower than red at TOA, so a
+# single window renders the panels red-dominant. Set to None for per-image percentiles,
+# which makes panels comparable within a row but not between rows.
+S2_DISPLAY_WINDOWS_DN = {
+    3: (300.0, 3450.0),   # B4 red
+    2: (500.0, 2500.0),   # B3 green
+    1: (700.0, 2100.0),   # B2 blue
+}
+
 
 class NPYPairDataset(Dataset):
     """Memory-mapped (X, y) pairs.
@@ -251,23 +262,39 @@ S1_DB_RANGES = {
     "VH": S1_CLIP["VH"],
 }
 
-def percentile_stretch_np(arr: np.ndarray, p_low: float = 2.0, p_high: float = 98.0) -> np.ndarray:
-    """2–98% percentile stretch to uint8 (handles NaNs)."""
+def percentile_limits_np(arr: np.ndarray, p_low: float = 2.0, p_high: float = 98.0):
+    """Percentile limits of a single array, NaN-safe. Returns (lo, hi) or None if unusable."""
     a = arr.astype(np.float32)
     finite = np.isfinite(a)
     if not finite.any():
-        return np.zeros_like(a, dtype=np.uint8)
+        return None
     lo = np.nanpercentile(a[finite], p_low)
     hi = np.nanpercentile(a[finite], p_high)
-    if not np.isfinite(lo): lo = np.nanmin(a)
-    if not np.isfinite(hi): hi = np.nanmax(a)
+    if not np.isfinite(lo):
+        lo = np.nanmin(a)
+    if not np.isfinite(hi):
+        hi = np.nanmax(a)
     if hi <= lo:
-        scaled = np.zeros_like(a, dtype=np.uint8)
-    else:
-        scaled = (np.clip(a, lo, hi) - lo) / (hi - lo)
-        scaled = (scaled * 255.0).round().astype(np.uint8)
+        return None
+    return float(lo), float(hi)
+
+
+def apply_stretch_np(arr: np.ndarray, limits) -> np.ndarray:
+    """Scale to uint8 using explicit (lo, hi) limits."""
+    a = arr.astype(np.float32)
+    finite = np.isfinite(a)
+    if limits is None:
+        return np.zeros_like(a, dtype=np.uint8)
+    lo, hi = limits
+    scaled = (np.clip(a, lo, hi) - lo) / (hi - lo)
+    scaled = (scaled * 255.0).round().astype(np.uint8)
     scaled[~finite] = 0
     return scaled
+
+
+def percentile_stretch_np(arr: np.ndarray, p_low: float = 2.0, p_high: float = 98.0) -> np.ndarray:
+    """2–98% percentile stretch to uint8 (handles NaNs)."""
+    return apply_stretch_np(arr, percentile_limits_np(arr, p_low, p_high))
 
 def from_tanh_to_range_torch(x_m11: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
     """[-1,1] -> [lo,hi] (torch, stays on device)"""
@@ -379,6 +406,31 @@ def _s2_to_rgb_percentile(y_nhwc: torch.Tensor, rgb_idx=(3, 2, 1)) -> np.ndarray
         out[i] = np.stack([R, G, B], axis=-1)
     return out
 
+def _s2_pair_to_rgb_shared(pred_nhwc: torch.Tensor, target_nhwc: torch.Tensor, rgb_idx=(3, 2, 1)):
+    """RGB panels for prediction and target under ONE stretch, taken from the target.
+
+    Stretching each panel by its own statistics erases colour cast and radiometric bias,
+    which is exactly what these panels are meant to reveal.
+    Returns (pred_u8, target_u8), each (N,H,W,3).
+    """
+    N, H, W = target_nhwc.shape[0], target_nhwc.shape[1], target_nhwc.shape[2]
+    pred_out = np.zeros((N, H, W, 3), dtype=np.uint8)
+    tgt_out = np.zeros((N, H, W, 3), dtype=np.uint8)
+
+    for ch, band_idx in enumerate(rgb_idx):
+        p_np = band_denorm_s2_to_np(pred_nhwc, band_idx, S2_CLIP)
+        t_np = band_denorm_s2_to_np(target_nhwc, band_idx, S2_CLIP)
+
+        fixed = S2_DISPLAY_WINDOWS_DN.get(band_idx) if S2_DISPLAY_WINDOWS_DN else None
+
+        for i in range(N):
+            limits = fixed or percentile_limits_np(t_np[i])
+            pred_out[i, ..., ch] = apply_stretch_np(p_np[i], limits)
+            tgt_out[i, ..., ch] = apply_stretch_np(t_np[i], limits)
+
+    return pred_out, tgt_out
+
+
 @torch.no_grad()
 def save_monitor_samples(epoch_idx: int, netG, batch_X_cpu: torch.Tensor, batch_y_cpu: torch.Tensor,
                          rgb_idx, out_root: str, include_input=True, device=None):
@@ -391,10 +443,9 @@ def save_monitor_samples(epoch_idx: int, netG, batch_X_cpu: torch.Tensor, batch_
 
     pred = netG(X).detach()  # (N,H,W,13)
 
-    # Build panels
+    # Build panels. Prediction and target share the target's stretch.
     sar_rgb_u8 = _sar_rgb_from_norm_percentile(X)               # (N,H,W,3) uint8
-    pred_rgb_u8 = _s2_to_rgb_percentile(pred, rgb_idx=rgb_idx)  # (N,H,W,3) uint8
-    tgt_rgb_u8  = _s2_to_rgb_percentile(Y,    rgb_idx=rgb_idx)  # (N,H,W,3) uint8
+    pred_rgb_u8, tgt_rgb_u8 = _s2_pair_to_rgb_shared(pred, Y, rgb_idx=rgb_idx)
 
     # If you ALSO want VV/VH grayscale next to SAR RGB, flip this toggle True:
     ADD_VV_VH = False
