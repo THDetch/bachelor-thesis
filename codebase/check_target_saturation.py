@@ -20,7 +20,7 @@ import numpy as np
 
 DATA_DIR = "dataset_all_seasons_scenesplit"
 SPLIT = "train"              # train | val | test
-SAMPLES = 2000               # patches to sample; set to 0 to scan the whole split
+SAMPLES = 0               # patches to sample; set to 0 to scan the whole split
 SEED = 42
 
 # Saturation is concentrated in a few snowy/cloudy scenes, so the tail needs more
