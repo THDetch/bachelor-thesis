@@ -1306,7 +1306,8 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     ) as val_pbar:
 
         with torch.no_grad():
-            for batch_X, batch_y in val_pbar:
+            for batch in val_pbar:
+                batch_X, batch_y = batch[0], batch[1]
                 batch_X = batch_X.to(device)
                 batch_y = batch_y.to(device)
 
