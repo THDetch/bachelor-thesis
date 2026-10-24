@@ -320,13 +320,19 @@ def _radial_bins(h, w, device, nbins):
 
 
 def radial_psd(x, bins_idx, bins_count, window):
-    """Radially averaged power spectrum per patch and band, shape (N, C, nbins)."""
-    xw = (x - x.mean((1, 2), keepdim=True)) * window[None, :, :, None]
+    """Radially averaged power per patch and band, shape (N, C, nbins-1), plus total power.
+
+    Subtracts the WINDOW-WEIGHTED mean: removing the plain mean and then multiplying by
+    Hann reintroduces a DC term worth ~10-40% of the signal. Bin 0 holds the (0,0)
+    coefficient and is dropped here so no caller can report it as a low frequency.
+    """
+    w = window[None, :, :, None]
+    xw = (x - (x * w).sum((1, 2), keepdim=True) / w.sum((1, 2), keepdim=True)) * w
     f = torch.fft.rfft2(xw.permute(0, 3, 1, 2))
     p = (f.real ** 2 + f.imag ** 2).flatten(2)
     sums = torch.zeros(p.shape[0], p.shape[1], len(bins_count), device=x.device)
     sums.index_add_(2, bins_idx, p)
-    return (sums / bins_count)[:, :, :-1]
+    return (sums / bins_count)[:, :, 1:-1], p.sum(-1)
 
 
 def band_statistics(fake_B, real_B, bands, bins_idx, bins_count, window):
@@ -348,17 +354,28 @@ def band_statistics(fake_B, real_B, bands, bins_idx, bins_count, window):
         out["hf_pred"] = f_hf.std((1, 2)).cpu().numpy()
         out["hf_target"] = r_hf.std((1, 2)).cpu().numpy()
         out["hf_ratio"] = (f_hf.std((1, 2)) / (r_hf.std((1, 2)) + 1e-12)).cpu().numpy()
+        out["mean_pred"] = fake_B.mean((1, 2)).cpu().numpy()
+        out["mean_target"] = real_B.mean((1, 2)).cpu().numpy()
         out["mean_err"] = (fake_B - real_B).mean((1, 2)).cpu().numpy()
 
-        psd_f = radial_psd(fake_B, bins_idx, bins_count, window)
-        psd_r = radial_psd(real_B, bins_idx, bins_count, window)
-        out["psd_ratio"] = (psd_f / (psd_r + 1e-20)).cpu().numpy()
+        # Spectra are kept unreduced so the ratio of means can be formed at the end;
+        # the mean of per-patch ratios is unusable where target power is sometimes tiny.
+        psd_f, tot_f = radial_psd(fake_B, bins_idx, bins_count, window)
+        psd_r, tot_r = radial_psd(real_B, bins_idx, bins_count, window)
+        out["psd_pred"] = psd_f.cpu().numpy()
+        out["psd_target"] = psd_r.cpu().numpy()
+        out["psd_total_pred"] = tot_f.cpu().numpy()
+        out["psd_total_target"] = tot_r.cpu().numpy()
 
         thr = SSIM_C2_SQRT
-        out["ssim_inactive_pred"] = (
-            (_local_std(fake_B, SSIM_WIN_SIGMA, bands) < thr).float().mean((1, 2)).cpu().numpy())
-        out["ssim_inactive_target"] = (
-            (_local_std(real_B, SSIM_WIN_SIGMA, bands) < thr).float().mean((1, 2)).cpu().numpy())
+        ls_t = _local_std(real_B, SSIM_WIN_SIGMA, bands)
+        ls_p = _local_std(fake_B, SSIM_WIN_SIGMA, bands)
+        out["ssim_inactive_target"] = (ls_t < thr).float().mean((1, 2)).cpu().numpy()
+        out["ssim_inactive_pred"] = (ls_p < thr).float().mean((1, 2)).cpu().numpy()
+
+        # Calibration point for instance noise: the scale of real local detail.
+        out["local_std_target"] = ls_t.flatten(1, 2).median(dim=1).values.cpu().numpy()
+        out["local_std_pred"] = ls_p.flatten(1, 2).median(dim=1).values.cpu().numpy()
 
     return out
 
@@ -475,7 +492,7 @@ def plot_blur_sweep(sigmas, deg, lo, hi, group_curves, out_dir):
 def plot_psd(centres, psd_ratio, groups, out_dir):
     plt.figure(figsize=(9, 5))
     for name, bands in groups.items():
-        plt.semilogx(centres[1:], psd_ratio[bands][:, 1:].mean(axis=0), label=name)
+        plt.semilogx(centres, psd_ratio[bands].mean(axis=0), label=name)
     plt.axhline(1.0, color="k", lw=0.8, ls=":")
     plt.xlabel("spatial frequency (cycles/px)")
     plt.ylabel("PSD(pred) / PSD(target)")
@@ -670,18 +687,50 @@ def main():
     hf_ratio_mean = stats["hf_ratio"].mean(axis=0)
     bias_dn = stats["mean_err"].mean(axis=0) * dn_scale
     bias_scene_sd_dn = stats["mean_err"].std(axis=0) * dn_scale
-    psd_ratio = stats["psd_ratio"].mean(axis=0)
+    psd_ratio = stats["psd_pred"].mean(axis=0) / (stats["psd_target"].mean(axis=0) + 1e-20)
     ssim_in_p = stats["ssim_inactive_pred"].mean(axis=0)
     ssim_in_t = stats["ssim_inactive_target"].mean(axis=0)
+    local_std_t = np.median(stats["local_std_target"], axis=0)
+    local_std_p = np.median(stats["local_std_pred"], axis=0)
+
+    # Reference for the bias spread: how much do target patch means vary at all, and
+    # how much of that does G explain? Without this the bias sd is just a number.
+    tgt_mean_sd_dn = stats["mean_target"].std(axis=0) * dn_scale
+    mean_r2 = 1.0 - (stats["mean_err"] ** 2).mean(axis=0) / (
+        stats["mean_target"].var(axis=0) + 1e-20)
+
+    # Parseval: total power from the binned spectra must match the measured variance.
+    # A mismatch means the spectral path is broken, which is how the DC bin slipped
+    # through last time.
+    var_ratio_direct = (stats["std_pred"] ** 2).mean(axis=0) / (
+        (stats["std_target"] ** 2).mean(axis=0) + 1e-20)
+    var_ratio_psd = stats["psd_total_pred"].mean(axis=0) / (
+        stats["psd_total_target"].mean(axis=0) + 1e-20)
+    parseval_dev = np.abs(var_ratio_psd / (var_ratio_direct + 1e-20) - 1.0)
 
     print("\n(2) band statistics, per patch then averaged [no D involved]")
     print(f"{'band':>5} {'std ratio':>10} {'(median)':>9} {'HF ratio':>9} "
-          f"{'bias DN':>9} {'sd(bias)':>9} {'SSIM off tgt':>13} {'pred':>7}")
-    print("-" * 80)
+          f"{'bias DN':>9} {'sd(bias)':>9} {'sd(tgt mu)':>11} {'R2(mu)':>8} "
+          f"{'SSIM off tgt':>13} {'pred':>7}")
+    print("-" * 100)
     for c, name in enumerate(BAND_NAMES[:c_out]):
         print(f"{name:>5} {std_ratio_mean[c]:>10.3f} {std_ratio_med[c]:>9.3f} "
               f"{hf_ratio_mean[c]:>9.3f} {bias_dn[c]:>+9.1f} {bias_scene_sd_dn[c]:>9.1f} "
+              f"{tgt_mean_sd_dn[c]:>11.1f} {mean_r2[c]:>8.3f} "
               f"{ssim_in_t[c]:>12.1%} {ssim_in_p[c]:>7.1%}")
+
+    worst = int(np.argmax(parseval_dev))
+    print(f"\nParseval check: variance ratio from spectra vs from pixels, "
+          f"worst band {BAND_NAMES[worst]} "
+          f"{var_ratio_psd[worst]:.4f} vs {var_ratio_direct[worst]:.4f} "
+          f"({parseval_dev[worst]:.1%} off)")
+    if parseval_dev.max() > 0.2:
+        print("[WARN] spectra and pixel variances disagree; treat the PSD curves as suspect")
+
+    land = [b for g in ("VIS", "RE", "NIR", "SWIR") for b in groups.get(g, [])]
+    land_local_std = float(np.median(local_std_t[land]))
+    print(f"\nMedian local std (11x11, normalized): target land bands "
+          f"{land_local_std:.4f}, prediction {np.median(local_std_p[land]):.4f}")
 
     report["band_stats"] = {
         name: {
@@ -694,14 +743,22 @@ def main():
             "hf_target_dn": float(stats["hf_target"].mean(axis=0)[c] * dn_scale[c]),
             "bias_dn": float(bias_dn[c]),
             "bias_scene_sd_dn": float(bias_scene_sd_dn[c]),
+            "target_patch_mean_sd_dn": float(tgt_mean_sd_dn[c]),
+            "patch_mean_r2": float(mean_r2[c]),
+            "var_ratio_pixels": float(var_ratio_direct[c]),
+            "var_ratio_spectra": float(var_ratio_psd[c]),
             "ssim_inactive_target": float(ssim_in_t[c]),
             "ssim_inactive_pred": float(ssim_in_p[c]),
+            "local_std_target": float(local_std_t[c]),
+            "local_std_pred": float(local_std_p[c]),
         }
         for c, name in enumerate(BAND_NAMES[:c_out])
     }
-    centres_np = centres.cpu().numpy()
+    report["instance_noise_sigma0"] = land_local_std
+    centres_np = centres.cpu().numpy()[1:]   # bin 0 is the DC bin and is not reported
     report["psd_frequencies_cpp"] = [float(v) for v in centres_np]
-    report["psd_wavelength_m"] = [float(PIXEL_METRES / v) if v > 0 else None for v in centres_np]
+    report["psd_wavelength_m"] = [float(PIXEL_METRES / v) for v in centres_np]
+    report["psd_ratio_note"] = "ratio of mean spectra, DC bin excluded"
     report["psd_ratio"] = {
         name: [float(v) for v in psd_ratio[c]] for c, name in enumerate(BAND_NAMES[:c_out])}
 
