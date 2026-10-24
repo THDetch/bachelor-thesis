@@ -46,10 +46,11 @@ class NPYPairDataset(Dataset):
     numpy-to-tensor copy. Memory mapping leaves the pages to the OS cache instead.
     """
 
-    def __init__(self, x_path, y_path, channel_select=None):
+    def __init__(self, x_path, y_path, channel_select=None, return_index=False):
         self.x_path = x_path
         self.y_path = y_path
         self.channel_select = channel_select
+        self.return_index = return_index
 
         X = np.load(x_path, mmap_mode="r")
         Y = np.load(y_path, mmap_mode="r")
@@ -84,10 +85,11 @@ class NPYPairDataset(Dataset):
         if self.channel_select is not None:
             x = x[..., self.channel_select:self.channel_select + 1]
 
-        return (
+        out = (
             torch.from_numpy(np.asarray(x, dtype=np.float32)),
             torch.from_numpy(np.asarray(y, dtype=np.float32)),
         )
+        return out + (idx,) if self.return_index else out
 
 
 def _sampled_range(path, n=32):
@@ -104,17 +106,20 @@ def get_train_val_loaders(
     channel_select=None,
     drop_last=False,
     num_workers=16,
+    return_index=False,
 ):
     train_dataset = NPYPairDataset(
         os.path.join(train_data_folder, "X_train.npy"),
         os.path.join(train_data_folder, "y_train.npy"),
         channel_select=channel_select,
+        return_index=return_index,
     )
 
     val_dataset = NPYPairDataset(
         os.path.join(val_data_folder, "X_val.npy"),
         os.path.join(val_data_folder, "y_val.npy"),
         channel_select=channel_select,
+        return_index=return_index,
     )
 
     y_train_lo, y_train_hi = _sampled_range(os.path.join(train_data_folder, "y_train.npy"))
