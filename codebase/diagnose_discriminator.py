@@ -1,30 +1,36 @@
-# Post-hoc discriminator diagnostics.
+# Post-hoc discriminator diagnostics. Never updates weights, never touches training code.
 #
-# Answers one question: WHAT is the discriminator using to separate real from fake?
-# Run it on a trained checkpoint; it never updates weights.
+# Decides what D's cue actually is: texture, contrast/level (radiometry), or both,
+# and whether D uses the SAR condition at all.
 #
-#   (b1) per-channel input sensitivity   -> which of the 15 input channels D reacts to
-#   (b2) splice-in  (fake + real band)   -> single, cumulative, and a harness check
-#   (b3) leave-one-out (real + fake band)-> does ONE fake band condemn a real patch?
-#   (b4) blur test  (blurred real)       -> the only test with no splicing artefacts
-#   (c)  D output map overlaid on RGB    -> where in the image D is confident
-#   (d)  pred vs GT under ONE stretch    -> what the images really look like
+#   (1) blur sweep          ID   all-band Gaussian on the real target, sigma 0.5..8
+#                           OOD  per-group blur (VIS/RE/NIR/SWIR/ATM)
+#   (2) band statistics     --   G vs target directly: per-patch std, HF, PSD, bias, SSIM
+#   (3) moment matching     ~ID  fake corrected to the target's per-patch level/contrast
+#   (4) SAR conditioning    ID   SAR deranged across scenes; does D read the condition?
+#   (5) splice / LOO        OOD  kept from the previous round, relabelled
 #
-# CAVEAT for (b2) and (b3): a patch mixing real and generated bands is out of
-# distribution for D -- it never saw one during training. So splice results cannot on
-# their own separate "D reads a joint cross-band cue" from "D rejects inconsistent
-# mixtures". Only (b4) keeps the input on the real-image manifold.
+# ID vs OOD matters: a patch mixing real and generated bands is something D never saw,
+# so splice and leave-one-out cannot separate "D reads a joint cue" from "D rejects
+# inconsistent mixtures". Blur, moment matching and the SAR test stay on or near the
+# real-image manifold and carry the weight of any conclusion.
 #
 # Usage: adjust CONFIG, then `python diagnose_discriminator.py`
 
+import csv
 import json
 import os
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 # -------------------- CONFIG --------------------
@@ -32,27 +38,36 @@ from PIL import Image
 RUN_NAME = "baseline_scenesplit_sn"
 MODEL_DIR = f"trained_{RUN_NAME}/pix2pix"
 DATA_DIR = "dataset_all_seasons_scenesplit"
-SPLIT = "val"                       # held-out data, so D is judged on unseen scenes
+SPLIT = "val"                       # held-out scenes only
 
-# Checkpoint pair to analyse. Must match how the run was configured.
-NETG_FILE = "pix2pix_best_netG.pth"
-NETD_FILE = "pix2pix_best_netD.pth"
+# Epoch-100 weights. The 100-epoch run predates `checkpoint_every`, so these files may
+# not exist; checkpoint_last.pt holds the same epoch and is used as the fallback.
+NETG_FILE = "pix2pix_epoch_100_netG.pth"
+NETD_FILE = "pix2pix_epoch_100_netD.pth"
+FALLBACK_CHECKPOINT = "checkpoint_last.pt"
 
 NORM_G = "batch"
 NORM_D = "instance"
 USE_SPECTRAL_NORM = True
 
-N_SAMPLES = 512                     # patches for the sensitivity/ablation statistics
-N_PANELS = 8                        # patches to render as images
+N_SAMPLES = 512
+N_PANELS = 8
 BATCH = 16
 GPU_ID = 0
 SEED = 42
 
-BLUR_SIGMAS = (0.5, 1.0, 2.0)       # pixels, applied to the REAL target
-N_BOOT = 2000                       # bootstrap resamples over patches
-CI_ALPHA = 0.05
+BLUR_SIGMAS = (0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0)   # all-band sweep, ID
+GROUP_SIGMAS = (2.0, 4.0, 8.0)                      # per-group sweep, OOD
+HF_SIGMA = 1.0                                      # high-frequency residual cut
+PSD_BINS = 48
+SSIM_WIN_SIGMA = 1.5                                # matches torchmetrics SSIM
+SSIM_C2_SQRT = 0.06                                 # sqrt(C2) for K2=0.03, L=2
 
-OUT_DIR = f"{MODEL_DIR}/diagnostics_CIs"
+N_BOOT = 1000
+CI_ALPHA = 0.05
+HARNESS_TOL = 0.001                                 # abort if the splice harness drifts
+
+OUT_DIR = f"{MODEL_DIR}/diagnostics"
 
 
 # -------------------- SETUP --------------------
@@ -76,25 +91,50 @@ BAND_NAMES = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B10"
 RGB_IDX = (3, 2, 1)
 
 BAND_GROUPS = {
-    "ALL": list(range(13)),
     "VIS": [1, 2, 3],        # B2 B3 B4
     "RE": [4, 5, 6],         # B5 B6 B7
     "NIR": [7, 8],           # B8 B8A
     "SWIR": [11, 12],        # B11 B12
+    "ATM": [0, 9, 10],       # B1 B9 B10, the 60 m bands
 }
 
+PIXEL_METRES = 10.0
 
-def load_models(c_in, c_out, img_size, device):
+
+def resolve_checkpoint():
+    g = os.path.join(MODEL_DIR, NETG_FILE)
+    d = os.path.join(MODEL_DIR, NETD_FILE)
+    if os.path.isfile(g) and os.path.isfile(d):
+        return {"source": "epoch_files", "netG_path": g, "netD_path": d, "epoch": 100}
+
+    ck = os.path.join(MODEL_DIR, FALLBACK_CHECKPOINT)
+    if os.path.isfile(ck):
+        return {"source": "checkpoint_last", "netG_path": ck, "netD_path": ck, "epoch": None}
+
+    raise FileNotFoundError(
+        f"No weights in {MODEL_DIR}: expected {NETG_FILE}/{NETD_FILE} or {FALLBACK_CHECKPOINT}"
+    )
+
+
+def load_models(c_in, c_out, img_size, device, ckpt):
     netG = Pix2PixWrapper(in_channels=c_in, out_channels=c_out, img_size=img_size, norm=NORM_G)
-    netG.load_state_dict(torch.load(os.path.join(MODEL_DIR, NETG_FILE), map_location="cpu"))
 
-    # Same construction order as training, or the spectral-norm parameter names will not match.
+    # Construction order must match training or the spectral-norm parameter names differ.
     netD = define_D(input_nc=c_in + c_out, ndf=64, netD="basic", norm=NORM_D)
     netD = init_net(netD, init_type="normal", init_gain=0.02)
     if USE_SPECTRAL_NORM:
         netD = apply_spectral_norm(netD)
-    netD.load_state_dict(torch.load(os.path.join(MODEL_DIR, NETD_FILE), map_location="cpu"))
 
+    if ckpt["source"] == "checkpoint_last":
+        blob = torch.load(ckpt["netG_path"], map_location="cpu")
+        netG.load_state_dict(blob["netG"])
+        netD.load_state_dict(blob["netD"])
+        ckpt["epoch"] = int(blob.get("epoch", -1)) + 1
+    else:
+        netG.load_state_dict(torch.load(ckpt["netG_path"], map_location="cpu"))
+        netD.load_state_dict(torch.load(ckpt["netD_path"], map_location="cpu"))
+
+    # eval() also freezes the spectral-norm power iteration, so D is identical in every test.
     return netG.to(device).eval(), netD.to(device).eval()
 
 
@@ -103,79 +143,47 @@ def d_input(real_A, B):
     return torch.cat((real_A, B), -1).permute(0, 3, 1, 2)
 
 
-# -------------------- (b1) INPUT SENSITIVITY --------------------
-
-def channel_sensitivity(netD, real_A, fake_B, real_B, chan_std):
-    """Mean |dD/dx| per input channel, raw and scaled by that channel's std.
-
-    Raw magnitudes are not comparable across channels: B11 varies ~35x more than
-    B10 in [-1,1], so |grad| conflates "D cares" with "this channel has range".
-    """
-    out = {}
-    for tag, B in (("fake", fake_B), ("real", real_B)):
-        x = d_input(real_A, B).clone().requires_grad_(True)
-        grad, = torch.autograd.grad(netD(x).mean(), x)
-        raw = grad.abs().mean(dim=(0, 2, 3)).cpu().numpy()
-        out[tag] = {"raw": raw, "scaled": raw * chan_std}
-    return out
-
-
 def d_scores(netD, real_A, B):
     """Mean D output per patch, shape (N,). Per-patch so the bootstrap can resample."""
     with torch.no_grad():
         return netD(d_input(real_A, B)).mean(dim=(1, 2, 3)).cpu().numpy()
 
 
-# -------------------- (b2) SPLICE-IN --------------------
+# -------------------- STATISTICS --------------------
 
-def splice_in(netD, real_A, fake_B, real_B):
-    """Fake patch with ONE real band spliced in, for each band, plus the all-band check.
+def recovery_ratio(scores, d_fake, d_real, sel):
+    """(mean(scores) - mean(D_fake)) / (mean(D_real) - mean(D_fake)) over patches `sel`.
 
-    Returns raw per-patch D scores; recovery ratios are formed later so the bootstrap
-    can rebuild them from resampled patches. These are C separate experiments, not a
-    decomposition -- they have no reason to sum to the all-band value.
+    Ratios are rebuilt from resampled means rather than averaged per patch, so a patch
+    whose own real/fake gap is near zero cannot blow up the estimate.
     """
-    cols = []
-    for c in range(fake_B.shape[-1]):
-        spliced = fake_B.clone()
-        spliced[..., c] = real_B[..., c]
-        cols.append(d_scores(netD, real_A, spliced))
-
-    # Splicing every band must reproduce real_B; catches a wrong axis or concat order.
-    every = fake_B.clone()
-    for c in range(fake_B.shape[-1]):
-        every[..., c] = real_B[..., c]
-
-    return np.stack(cols, axis=1), d_scores(netD, real_A, every)
+    lo = d_fake[sel].mean()
+    hi = d_real[sel].mean()
+    return (scores[sel].mean(axis=0) - lo) / (hi - lo)
 
 
-def splice_in_cumulative(netD, real_A, fake_B, real_B, order):
-    """Fake patch with the top-k bands of `order` made real simultaneously, k = 1..C."""
-    spliced = fake_B.clone()
-    cols = []
-    for c in order:
-        spliced[..., c] = real_B[..., c]
-        cols.append(d_scores(netD, real_A, spliced))
-    return np.stack(cols, axis=1)
+def degradation_ratio(scores, d_fake, d_real, sel):
+    """How far a manipulated REAL patch falls toward fake. 1.0 = all the way."""
+    return 1.0 - recovery_ratio(scores, d_fake, d_real, sel)
 
 
-# -------------------- (b3) LEAVE-ONE-OUT --------------------
-
-def leave_one_out(netD, real_A, fake_B, real_B):
-    """Real patch with ONE band replaced by the generated band.
-
-    The reverse direction of (b2). If a single fake band is enough to condemn an
-    otherwise real patch, D holds a per-band test rather than a joint one.
-    """
-    cols = []
-    for c in range(real_B.shape[-1]):
-        damaged = real_B.clone()
-        damaged[..., c] = fake_B[..., c]
-        cols.append(d_scores(netD, real_A, damaged))
-    return np.stack(cols, axis=1)
+def bootstrap_ci(stat_fn, n, n_boot=N_BOOT, alpha=CI_ALPHA, seed=SEED):
+    rng = np.random.default_rng(seed)
+    draws = np.stack([stat_fn(rng.integers(0, n, n)) for _ in range(n_boot)])
+    return (np.percentile(draws, 100 * alpha / 2, axis=0),
+            np.percentile(draws, 100 * (1 - alpha / 2), axis=0))
 
 
-# -------------------- (b4) BLUR TEST --------------------
+def ci_of(scores, d_fake, d_real, n, fn=recovery_ratio):
+    """Point estimate plus bootstrap CI for a (N,) or (N,K) score array."""
+    arr = scores[:, None] if scores.ndim == 1 else scores
+    full = np.arange(n)
+    point = fn(arr, d_fake, d_real, full)
+    lo, hi = bootstrap_ci(lambda s: fn(arr, d_fake, d_real, s), n)
+    return point, lo, hi
+
+
+# -------------------- BLUR --------------------
 
 def _gaussian_kernel1d(sigma, device):
     radius = max(1, int(np.ceil(3.0 * sigma)))
@@ -185,7 +193,7 @@ def _gaussian_kernel1d(sigma, device):
 
 
 def gaussian_blur_nhwc(x, sigma, bands):
-    """Separable Gaussian blur over `bands` only; the remaining bands pass through."""
+    """Separable Gaussian over `bands` only; remaining bands pass through unchanged."""
     k = _gaussian_kernel1d(sigma, x.device)
     r = (k.numel() - 1) // 2
 
@@ -200,102 +208,234 @@ def gaussian_blur_nhwc(x, sigma, bands):
     return out
 
 
-def blur_test(netD, real_A, real_B, groups, sigmas):
-    """D's score on REAL targets softened by a Gaussian, per sigma and band group.
-
-    The decisive test for "D detects missing texture": a blurred real image stays on
-    the real-image manifold, so a drop cannot be blamed on splicing artefacts.
-    """
+def blur_sweep(netD, real_A, real_B, all_bands, sigmas, groups, group_sigmas):
     out = {}
     with torch.no_grad():
+        for s in sigmas:
+            out[("ALL", s)] = d_scores(netD, real_A, gaussian_blur_nhwc(real_B, s, all_bands))
         for name, bands in groups.items():
-            for s in sigmas:
+            for s in group_sigmas:
                 out[(name, s)] = d_scores(netD, real_A, gaussian_blur_nhwc(real_B, s, bands))
     return out
 
 
-# -------------------- UNCERTAINTY --------------------
+# -------------------- MOMENT MATCHING --------------------
 
-def recovery_ratio(scores, d_fake, d_real, sel):
-    """(mean(scores) - mean(D_fake)) / (mean(D_real) - mean(D_fake)) over patches `sel`.
+def moment_variants(fake_B, real_B):
+    """Fake corrected to the target's per-patch per-band level and/or contrast.
 
-    Ratios are rebuilt from resampled means rather than averaged per patch, so a patch
-    whose own real/fake gap is near zero cannot blow up the estimate.
+    Isolates radiometry from spatial structure: every variant keeps the generator's
+    own texture and only rewrites its first two moments.
     """
-    lo = d_fake[sel].mean()
-    hi = d_real[sel].mean()
-    return (scores[sel].mean(axis=0) - lo) / (hi - lo)
+    mu_f = fake_B.mean((1, 2), keepdim=True)
+    sd_f = fake_B.std((1, 2), keepdim=True) + 1e-6
+    mu_r = real_B.mean((1, 2), keepdim=True)
+    sd_r = real_B.std((1, 2), keepdim=True)
+
+    variants = {
+        "level": fake_B - mu_f + mu_r,
+        "contrast": (fake_B - mu_f) / sd_f * sd_r + mu_f,
+        "level+contrast": (fake_B - mu_f) / sd_f * sd_r + mu_r,
+        # Reverse direction: real pushed onto the fake's moments.
+        "reverse_real_to_fake": (real_B - mu_r) / (sd_r + 1e-6) * sd_f + mu_f,
+    }
+
+    clamped = {}
+    for k, v in variants.items():
+        clamped[k] = ((v < -1.0) | (v > 1.0)).float().mean().item()
+        variants[k] = v.clamp(-1.0, 1.0)
+
+    return variants, clamped
 
 
-def bootstrap_ci(stat_fn, n, n_boot=N_BOOT, alpha=CI_ALPHA, seed=SEED):
+# -------------------- SAR CONDITIONING --------------------
+
+def scene_derangement(scenes, seed=SEED):
+    """Permutation where no patch keeps its own SAR and none draws from its own scene.
+
+    Sorting by scene makes each scene contiguous, so rolling by the largest scene size
+    moves every element clear of its own block.
+    """
+    n = len(scenes)
+    counts = defaultdict(int)
+    for s in scenes:
+        counts[s] += 1
+    shift = max(counts.values())
+
+    if shift <= n // 2:
+        order = np.argsort(np.asarray(scenes), kind="stable")
+        perm = np.empty(n, dtype=np.int64)
+        perm[order] = np.roll(order, shift)
+        bad = sum(scenes[perm[i]] == scenes[i] for i in range(n))
+        if bad == 0:
+            return perm, 0
+
     rng = np.random.default_rng(seed)
-    draws = np.stack([stat_fn(rng.integers(0, n, n)) for _ in range(n_boot)])
-    return (np.percentile(draws, 100 * alpha / 2, axis=0),
-            np.percentile(draws, 100 * (1 - alpha / 2), axis=0))
+    cand = rng.permutation(n)
+    for _ in range(1000):
+        bad_pos = [i for i in range(n) if scenes[cand[i]] == scenes[i]]
+        if not bad_pos:
+            return cand, 0
+        for i in bad_pos:
+            j = int(rng.integers(0, n))
+            cand[i], cand[j] = cand[j], cand[i]
+
+    return cand, sum(scenes[cand[i]] == scenes[i] for i in range(n))
 
 
-# -------------------- (b5) BAND STATISTICS --------------------
+def load_scene_ids(data_dir, split, n_patches):
+    """Scene id per patch index, from the split CSV written by the preparation script."""
+    csv_path = os.path.join(data_dir, f"{split}_pairs.csv")
+    rows = []
+    with open(csv_path, newline="") as f:
+        for r in csv.DictReader(f):
+            rows.append(f"{r['roi_group']}_{r['season']}_{r['roi_id']}")
 
-def band_statistics(fake_B, real_B, sigma=1.0):
-    """Per-band sums for level, contrast and high-frequency energy, pred vs target.
+    if n_patches % len(rows) != 0:
+        raise ValueError(f"{n_patches} patches is not a multiple of {len(rows)} CSV rows")
 
-    Separates two failure modes the blur test cannot: a Gaussian removes fine detail
-    but preserves large-scale contrast, so if D punishes the generator far harder than
-    it punishes blur, the generator must also be losing contrast, not just texture.
-    Sums rather than per-batch moments, so the pooled std is exact.
+    crops_per_image = n_patches // len(rows)
+    return [rows[i // crops_per_image] for i in range(n_patches)]
+
+
+# -------------------- BAND STATISTICS --------------------
+
+def _local_std(x, sigma, bands):
+    """Gaussian-weighted local std, matching the SSIM window."""
+    mu = gaussian_blur_nhwc(x, sigma, bands)
+    mu2 = gaussian_blur_nhwc(x * x, sigma, bands)
+    return torch.sqrt(torch.clamp(mu2 - mu * mu, min=0.0))
+
+
+def _radial_bins(h, w, device, nbins):
+    """Radial frequency bins. Corner frequencies above 0.5 cyc/px go to a discard bin:
+    they are sampled anisotropically and would contaminate the last real bin."""
+    fy = torch.fft.fftfreq(h, device=device).view(-1, 1)
+    fx = torch.fft.rfftfreq(w, device=device).view(1, -1)
+    r = torch.sqrt(fy ** 2 + fx ** 2)
+    idx = torch.clamp((r / 0.5 * nbins).long(), max=nbins).flatten()
+    counts = torch.bincount(idx, minlength=nbins + 1).clamp(min=1).float()
+    centres = (torch.arange(nbins, device=device).float() + 0.5) / nbins * 0.5
+    return idx, counts, centres
+
+
+def radial_psd(x, bins_idx, bins_count, window):
+    """Radially averaged power spectrum per patch and band, shape (N, C, nbins)."""
+    xw = (x - x.mean((1, 2), keepdim=True)) * window[None, :, :, None]
+    f = torch.fft.rfft2(xw.permute(0, 3, 1, 2))
+    p = (f.real ** 2 + f.imag ** 2).flatten(2)
+    sums = torch.zeros(p.shape[0], p.shape[1], len(bins_count), device=x.device)
+    sums.index_add_(2, bins_idx, p)
+    return (sums / bins_count)[:, :, :-1]
+
+
+def band_statistics(fake_B, real_B, bands, bins_idx, bins_count, window):
+    """Per-patch contrast, high-frequency energy, spectra, bias and SSIM window activity.
+
+    Per patch, never pooled across patches: pooling would hide a per-scene level error
+    inside what looks like healthy global variance.
     """
-    bands = list(range(real_B.shape[-1]))
     out = {}
     with torch.no_grad():
-        for tag, B in (("pred", fake_B), ("target", real_B)):
-            hf = B - gaussian_blur_nhwc(B, sigma, bands)
-            out[tag] = {
-                "n": B[..., 0].numel(),
-                "sum": B.sum(dim=(0, 1, 2), dtype=torch.float64).cpu().numpy(),
-                "sumsq": (B.double() ** 2).sum(dim=(0, 1, 2)).cpu().numpy(),
-                "hf_sumsq": (hf.double() ** 2).sum(dim=(0, 1, 2)).cpu().numpy(),
-            }
+        f_hf = fake_B - gaussian_blur_nhwc(fake_B, HF_SIGMA, bands)
+        r_hf = real_B - gaussian_blur_nhwc(real_B, HF_SIGMA, bands)
+
+        sd_f = fake_B.std((1, 2))
+        sd_r = real_B.std((1, 2))
+        out["std_pred"] = sd_f.cpu().numpy()
+        out["std_target"] = sd_r.cpu().numpy()
+        out["std_ratio"] = (sd_f / (sd_r + 1e-12)).cpu().numpy()
+        out["hf_pred"] = f_hf.std((1, 2)).cpu().numpy()
+        out["hf_target"] = r_hf.std((1, 2)).cpu().numpy()
+        out["hf_ratio"] = (f_hf.std((1, 2)) / (r_hf.std((1, 2)) + 1e-12)).cpu().numpy()
+        out["mean_err"] = (fake_B - real_B).mean((1, 2)).cpu().numpy()
+
+        psd_f = radial_psd(fake_B, bins_idx, bins_count, window)
+        psd_r = radial_psd(real_B, bins_idx, bins_count, window)
+        out["psd_ratio"] = (psd_f / (psd_r + 1e-20)).cpu().numpy()
+
+        thr = SSIM_C2_SQRT
+        out["ssim_inactive_pred"] = (
+            (_local_std(fake_B, SSIM_WIN_SIGMA, bands) < thr).float().mean((1, 2)).cpu().numpy())
+        out["ssim_inactive_target"] = (
+            (_local_std(real_B, SSIM_WIN_SIGMA, bands) < thr).float().mean((1, 2)).cpu().numpy())
+
     return out
 
 
-# -------------------- (c) D OUTPUT MAP --------------------
+# -------------------- OOD TESTS (kept) --------------------
+
+def channel_sensitivity(netD, real_A, B):
+    """Mean |dD/dx| per input channel, per patch, shape (N, C_in+C_out)."""
+    x = d_input(real_A, B).clone().requires_grad_(True)
+    grad, = torch.autograd.grad(netD(x).mean(), x)
+    return grad.abs().mean(dim=(2, 3)).detach().cpu().numpy()
+
+
+def splice_in(netD, real_A, fake_B, real_B):
+    """Fake patch with ONE real band spliced in, per band, plus the all-band harness."""
+    cols = []
+    for c in range(fake_B.shape[-1]):
+        spliced = fake_B.clone()
+        spliced[..., c] = real_B[..., c]
+        cols.append(d_scores(netD, real_A, spliced))
+
+    every = fake_B.clone()
+    for c in range(fake_B.shape[-1]):
+        every[..., c] = real_B[..., c]
+
+    return np.stack(cols, axis=1), d_scores(netD, real_A, every)
+
+
+def splice_in_cumulative(netD, real_A, fake_B, real_B, order):
+    spliced = fake_B.clone()
+    cols = []
+    for c in order:
+        spliced[..., c] = real_B[..., c]
+        cols.append(d_scores(netD, real_A, spliced))
+    return np.stack(cols, axis=1)
+
+
+def leave_one_out(netD, real_A, fake_B, real_B):
+    """Real patch with ONE band replaced by the generated band."""
+    cols = []
+    for c in range(real_B.shape[-1]):
+        damaged = real_B.clone()
+        damaged[..., c] = fake_B[..., c]
+        cols.append(d_scores(netD, real_A, damaged))
+    return np.stack(cols, axis=1)
+
+
+# -------------------- IMAGES --------------------
 
 def save_d_maps(netD, real_A, fake_B, real_B, rgb_u8, out_dir, n):
     with torch.no_grad():
         m_fake = netD(d_input(real_A, fake_B)).cpu().numpy()
         m_real = netD(d_input(real_A, real_B)).cpu().numpy()
 
-    # A flat map and a broken colormap look identical; print the range so they are not.
+    # A flat map and a clipped colormap look identical; print the range so they are not.
     print(f"D map range   fake [{m_fake.min():.4f}, {m_fake.max():.4f}]   "
           f"real [{m_real.min():.4f}, {m_real.max():.4f}]")
 
     for i in range(min(n, m_fake.shape[0])):
         tiles = []
         for m in (m_fake[i, 0], m_real[i, 0]):
-            # D outputs a 30x30 patch grid; blow it up to image size for overlay.
             up = np.array(
                 Image.fromarray(np.clip(m, 0.0, 1.0).astype(np.float32)).resize(
-                    (rgb_u8.shape[2], rgb_u8.shape[1]), Image.NEAREST
-                )
-            )
+                    (rgb_u8.shape[2], rgb_u8.shape[1]), Image.NEAREST))
             heat = np.zeros((*up.shape, 3), dtype=np.uint8)
-            heat[..., 0] = (255 * (1.0 - up)).astype(np.uint8)   # red where D says "fake"
-            heat[..., 1] = (255 * up).astype(np.uint8)           # green where D says "real"
+            heat[..., 0] = (255 * (1.0 - up)).astype(np.uint8)
+            heat[..., 1] = (255 * up).astype(np.uint8)
             tiles.append(heat)
 
         canvas = np.concatenate([rgb_u8[i], tiles[0], tiles[1]], axis=1)
         Image.fromarray(canvas).save(os.path.join(out_dir, f"dmap_{i:02d}__rgb_fake_real.png"))
 
+    return [float(m_fake.min()), float(m_fake.max())], [float(m_real.min()), float(m_real.max())]
 
-# -------------------- (d) SHARED-STRETCH PANELS --------------------
 
 def save_panels(sar_u8, pred, target, s2_clip, out_dir, n):
-    """Prediction and target through the same fixed display window.
-
-    A per-image window taken from the target would be narrow on a low-contrast scene,
-    so a moderate prediction bias renders as pure white or pure black and the size of
-    the error is unreadable. Fixed windows keep panels comparable across scenes.
-    """
+    """Prediction and target through the same fixed display window."""
     def band(arr, idx):
         lo, hi = s2_clip[idx + 1]
         return (arr[..., idx] + 1.0) * 0.5 * (hi - lo) + lo
@@ -315,6 +455,71 @@ def save_panels(sar_u8, pred, target, s2_clip, out_dir, n):
         Image.fromarray(canvas).save(os.path.join(out_dir, f"panel_{i:02d}__sar_pred_gt.png"))
 
 
+def plot_blur_sweep(sigmas, deg, lo, hi, group_curves, out_dir):
+    plt.figure(figsize=(9, 5))
+    plt.plot(sigmas, deg, "o-", color="k", label="ALL bands (ID)")
+    plt.fill_between(sigmas, lo, hi, color="k", alpha=0.15)
+    for name, (xs, ys) in group_curves.items():
+        plt.plot(xs, ys, "s--", alpha=0.8, label=f"{name} only (OOD)")
+    plt.axhline(1.0, color="r", lw=0.8, ls=":")
+    plt.xlabel("Gaussian sigma (px)")
+    plt.ylabel("degradation toward fake")
+    plt.title("Blur applied to REAL targets")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "blur_sweep.png"), dpi=200)
+    plt.close()
+
+
+def plot_psd(centres, psd_ratio, groups, out_dir):
+    plt.figure(figsize=(9, 5))
+    for name, bands in groups.items():
+        plt.semilogx(centres[1:], psd_ratio[bands][:, 1:].mean(axis=0), label=name)
+    plt.axhline(1.0, color="k", lw=0.8, ls=":")
+    plt.xlabel("spatial frequency (cycles/px)")
+    plt.ylabel("PSD(pred) / PSD(target)")
+    plt.title("Radially averaged power-spectrum ratio")
+    plt.legend()
+    plt.grid(alpha=0.3, which="both")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "psd_ratio.png"), dpi=200)
+    plt.close()
+
+
+def plot_band_bars(names, std_ratio, hf_ratio, bias_dn, out_dir):
+    fig, ax = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    x = np.arange(len(names))
+    ax[0].bar(x, std_ratio, color="tab:blue")
+    ax[0].axhline(1.0, color="k", ls=":")
+    ax[0].set_ylabel("std(pred)/std(tgt)")
+    ax[1].bar(x, hf_ratio, color="tab:orange")
+    ax[1].axhline(1.0, color="k", ls=":")
+    ax[1].set_ylabel("HF ratio")
+    ax[2].bar(x, bias_dn, color="tab:green")
+    ax[2].axhline(0.0, color="k", ls=":")
+    ax[2].set_ylabel("bias (DN)")
+    ax[2].set_xticks(x)
+    ax[2].set_xticklabels(names)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "band_statistics.png"), dpi=200)
+    plt.close()
+
+
+def plot_moments(labels, vals, los, his, out_dir):
+    plt.figure(figsize=(7, 4.5))
+    x = np.arange(len(labels))
+    err = [np.array(vals) - np.array(los), np.array(his) - np.array(vals)]
+    plt.bar(x, vals, color="tab:purple", yerr=err, capsize=4)
+    plt.xticks(x, labels, rotation=15)
+    plt.ylabel("recovery toward real")
+    plt.title("Fake corrected to the target's per-patch moments")
+    plt.grid(alpha=0.3, axis="y")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "moment_matching.png"), dpi=200)
+    plt.close()
+
+
 # -------------------- MAIN --------------------
 
 def main():
@@ -329,42 +534,46 @@ def main():
     with open(os.path.join(DATA_DIR, "S2_clip.json")) as f:
         s2_clip = {int(k): tuple(v) for k, v in json.load(f).items()}
 
-    idx = np.sort(np.random.default_rng(SEED).choice(len(X), size=min(N_SAMPLES, len(X)), replace=False))
+    idx = np.sort(np.random.default_rng(SEED).choice(
+        len(X), size=min(N_SAMPLES, len(X)), replace=False))
     c_in, c_out, img_size = X.shape[-1], Y.shape[-1], X.shape[1]
     chan_names = ["VV", "VH"][:c_in] + BAND_NAMES[:c_out]
-
-    print(f"{MODEL_DIR}/{NETD_FILE} on {SPLIT}: {len(idx)} patches, device {device}")
-    netG, netD = load_models(c_in, c_out, img_size, device)
-
+    all_bands = list(range(c_out))
     groups = {k: [b for b in v if b < c_out] for k, v in BAND_GROUPS.items()}
     groups = {k: v for k, v in groups.items() if v}
 
-    sens_raw = np.zeros(c_in + c_out)
-    sens_scaled = np.zeros(c_in + c_out)
-    n_batches = 0
+    # DN half-range per band; std scales by this, so std ratios are identical in DN.
+    dn_scale = np.array([(s2_clip[b + 1][1] - s2_clip[b + 1][0]) / 2.0 for b in range(c_out)])
 
-    acc = {"fake": [], "real": [], "splice": [], "every": [], "loo": []}
-    blur_acc = {(g, s): [] for g in groups for s in BLUR_SIGMAS}
-    stat_acc = {t: {"n": 0, "sum": np.zeros(c_out), "sumsq": np.zeros(c_out),
-                    "hf_sumsq": np.zeros(c_out)} for t in ("pred", "target")}
+    ckpt = resolve_checkpoint()
+    netG, netD = load_models(c_in, c_out, img_size, device, ckpt)
+    print(f"{ckpt['source']} epoch {ckpt['epoch']} on {SPLIT}: {len(idx)} patches, {device}")
+
+    scenes_all = load_scene_ids(DATA_DIR, SPLIT, len(X))
+    scenes = [scenes_all[i] for i in idx]
+    perm, bad = scene_derangement(scenes)
+    if bad:
+        print(f"[WARN] {bad} patches kept a same-scene SAR in the derangement")
+
+    bins_idx, bins_count, centres = _radial_bins(img_size, img_size, device, PSD_BINS)
+    win1d = torch.hann_window(img_size, periodic=False, device=device)
+    window = torch.outer(win1d, win1d)
+
+    acc = defaultdict(list)
+    blur_acc = defaultdict(list)
+    stat_acc = defaultdict(list)
+    clamp_keys = ["level", "contrast", "level+contrast", "reverse_real_to_fake"]
     first = {}
 
     for start in range(0, len(idx), BATCH):
         sel = idx[start:start + BATCH]
         real_A = torch.from_numpy(np.asarray(X[sel], dtype=np.float32)).to(device)
         real_B = torch.from_numpy(np.asarray(Y[sel], dtype=np.float32)).to(device)
+        shuf_A = torch.from_numpy(
+            np.asarray(X[idx[perm[start:start + BATCH]]], dtype=np.float32)).to(device)
 
         with torch.no_grad():
             fake_B = netG(real_A)
-
-        chan_std = np.concatenate([
-            real_A.std(dim=(0, 1, 2)).cpu().numpy(),
-            real_B.std(dim=(0, 1, 2)).cpu().numpy(),
-        ])
-
-        s = channel_sensitivity(netD, real_A, fake_B, real_B, chan_std)
-        sens_raw += s["fake"]["raw"]
-        sens_scaled += s["fake"]["scaled"]
 
         acc["fake"].append(d_scores(netD, real_A, fake_B))
         acc["real"].append(d_scores(netD, real_A, real_B))
@@ -374,61 +583,198 @@ def main():
         acc["every"].append(ev)
         acc["loo"].append(leave_one_out(netD, real_A, fake_B, real_B))
 
-        for key, v in blur_test(netD, real_A, real_B, groups, BLUR_SIGMAS).items():
+        for key, v in blur_sweep(netD, real_A, real_B, all_bands,
+                                 BLUR_SIGMAS, groups, GROUP_SIGMAS).items():
             blur_acc[key].append(v)
 
-        for tag, s_ in band_statistics(fake_B, real_B).items():
-            for k_ in ("n", "sum", "sumsq", "hf_sumsq"):
-                stat_acc[tag][k_] = stat_acc[tag][k_] + s_[k_]
+        variants, clamped = moment_variants(fake_B, real_B)
+        for k, v in variants.items():
+            acc[f"moment::{k}"].append(d_scores(netD, real_A, v))
+        acc["clamped"].append(np.array([[clamped[k] for k in clamp_keys]]))
 
-        n_batches += 1
+        acc["sar_shuf_real"].append(d_scores(netD, shuf_A, real_B))
+        acc["sar_shuf_fake"].append(d_scores(netD, shuf_A, fake_B))
+        acc["sar_mean_real"].append(
+            d_scores(netD, real_A.mean((1, 2), keepdim=True).expand_as(real_A), real_B))
+
+        acc["sal_fake"].append(channel_sensitivity(netD, real_A, fake_B))
+
+        for k, v in band_statistics(fake_B, real_B, all_bands,
+                                    bins_idx, bins_count, window).items():
+            stat_acc[k].append(v)
 
         if not first:
             first = {"real_A": real_A, "fake_B": fake_B, "real_B": real_B}
 
-    sens_raw /= n_batches
-    sens_scaled /= n_batches
-
-    d_fake = np.concatenate(acc["fake"])
-    d_real = np.concatenate(acc["real"])
-    d_splice = np.concatenate(acc["splice"])
-    d_every = np.concatenate(acc["every"])
-    d_loo = np.concatenate(acc["loo"])
+    cat = {k: np.concatenate(v) for k, v in acc.items()}
     blur = {k: np.concatenate(v) for k, v in blur_acc.items()}
+    stats = {k: np.concatenate(v) for k, v in stat_acc.items()}
+
+    d_fake, d_real = cat["fake"], cat["real"]
     n = len(d_fake)
     full = np.arange(n)
 
-    recovery = recovery_ratio(d_splice, d_fake, d_real, full)
-    rec_lo, rec_hi = bootstrap_ci(lambda s: recovery_ratio(d_splice, d_fake, d_real, s), n)
+    # -------- harness gate --------
+    rec_all = recovery_ratio(cat["every"][:, None], d_fake, d_real, full)[0]
+    print(f"\nHarness check, every band spliced: {rec_all:.4%}")
+    if abs(rec_all - 1.0) > HARNESS_TOL:
+        raise SystemExit(f"Harness failed ({rec_all:.4%}); splice plumbing is broken, aborting.")
 
-    rec_all = recovery_ratio(d_every[:, None], d_fake, d_real, full)[0]
+    print(f"D(fake) {d_fake.mean():.4f}   D(real) {d_real.mean():.4f}   n = {n}\n")
 
-    # 1.0 = the single fake band costs the whole real/fake gap.
-    loo_drop = 1.0 - recovery_ratio(d_loo, d_fake, d_real, full)
-    loo_lo, loo_hi = bootstrap_ci(
-        lambda s: 1.0 - recovery_ratio(d_loo, d_fake, d_real, s), n)
+    report = {}
 
-    print(f"\nD(fake) {d_fake.mean():.4f}   D(real) {d_real.mean():.4f}   n = {n}")
-    print(f"Harness check, every band spliced: {rec_all:.1%}  (must be 100.0%)\n")
+    # -------- 1. blur sweep --------
+    deg, deg_lo, deg_hi = [], [], []
+    for s in BLUR_SIGMAS:
+        p, lo, hi = ci_of(blur[("ALL", s)], d_fake, d_real, n, degradation_ratio)
+        deg.append(p[0])
+        deg_lo.append(lo[0])
+        deg_hi.append(hi[0])
 
-    print("(b1/b2/b3) sensitivity, splice-in recovery, leave-one-out drop  [95% CI]")
-    print(f"{'chan':>5} {'x std':>10} {'share':>7} | {'splice-in':>20} | {'leave-one-out':>20}")
-    print("-" * 70)
-    total = sens_scaled.sum() + 1e-12
-    for i, name in enumerate(chan_names):
-        if i < c_in:
-            sp = loo_s = f"{'-':>20}"
-        else:
-            c = i - c_in
-            sp = f"{recovery[c]:>7.1%} [{rec_lo[c]:>5.1%},{rec_hi[c]:>5.1%}]"
-            loo_s = f"{loo_drop[c]:>7.1%} [{loo_lo[c]:>5.1%},{loo_hi[c]:>5.1%}]"
-        print(f"{name:>5} {sens_scaled[i]:>10.3e} {sens_scaled[i] / total:>6.1%} | {sp} | {loo_s}")
+    reached = [s for s, v in zip(BLUR_SIGMAS, deg) if v >= 0.99]
+    report["blur_sigma_star"] = float(reached[0]) if reached else None
+    report["blur_plateau"] = float(max(deg))
+    report["blur_all"] = {
+        f"sigma{s}": {"deg": float(d), "ci": [float(a), float(b)], "regime": "ID"}
+        for s, d, a, b in zip(BLUR_SIGMAS, deg, deg_lo, deg_hi)}
 
+    print("(1) blur sweep, ALL bands [ID]")
+    print(f"{'sigma':>6} {'deg':>9} {'95% CI':>20}")
+    print("-" * 38)
+    for s, d, a, b in zip(BLUR_SIGMAS, deg, deg_lo, deg_hi):
+        print(f"{s:>6.1f} {d:>8.1%} [{a:>7.1%},{b:>7.1%}]")
+    print(f"sigma* (deg >= 99%): {report['blur_sigma_star']}   "
+          f"plateau: {report['blur_plateau']:.1%}")
+
+    group_curves = {}
+    report["blur_groups"] = {}
+    print(f"\n   per-group blur [OOD]\n{'group':>6} {'sigma':>6} {'deg':>9} {'95% CI':>20}")
+    print("-" * 45)
+    for name in groups:
+        xs, ys = [], []
+        for s in GROUP_SIGMAS:
+            p, lo, hi = ci_of(blur[(name, s)], d_fake, d_real, n, degradation_ratio)
+            xs.append(s)
+            ys.append(p[0])
+            report["blur_groups"][f"{name}_sigma{s}"] = {
+                "deg": float(p[0]), "ci": [float(lo[0]), float(hi[0])], "regime": "OOD"}
+            print(f"{name:>6} {s:>6.1f} {p[0]:>8.1%} [{lo[0]:>7.1%},{hi[0]:>7.1%}]")
+        group_curves[name] = (xs, ys)
+
+    plot_blur_sweep(list(BLUR_SIGMAS), deg, deg_lo, deg_hi, group_curves, OUT_DIR)
+
+    # -------- 2. band statistics --------
+    std_ratio_med = np.median(stats["std_ratio"], axis=0)
+    std_ratio_mean = stats["std_ratio"].mean(axis=0)
+    hf_ratio_mean = stats["hf_ratio"].mean(axis=0)
+    bias_dn = stats["mean_err"].mean(axis=0) * dn_scale
+    bias_scene_sd_dn = stats["mean_err"].std(axis=0) * dn_scale
+    psd_ratio = stats["psd_ratio"].mean(axis=0)
+    ssim_in_p = stats["ssim_inactive_pred"].mean(axis=0)
+    ssim_in_t = stats["ssim_inactive_target"].mean(axis=0)
+
+    print("\n(2) band statistics, per patch then averaged [no D involved]")
+    print(f"{'band':>5} {'std ratio':>10} {'(median)':>9} {'HF ratio':>9} "
+          f"{'bias DN':>9} {'sd(bias)':>9} {'SSIM off tgt':>13} {'pred':>7}")
+    print("-" * 80)
+    for c, name in enumerate(BAND_NAMES[:c_out]):
+        print(f"{name:>5} {std_ratio_mean[c]:>10.3f} {std_ratio_med[c]:>9.3f} "
+              f"{hf_ratio_mean[c]:>9.3f} {bias_dn[c]:>+9.1f} {bias_scene_sd_dn[c]:>9.1f} "
+              f"{ssim_in_t[c]:>12.1%} {ssim_in_p[c]:>7.1%}")
+
+    report["band_stats"] = {
+        name: {
+            "std_ratio_mean": float(std_ratio_mean[c]),
+            "std_ratio_median": float(std_ratio_med[c]),
+            "std_pred_dn": float(stats["std_pred"].mean(axis=0)[c] * dn_scale[c]),
+            "std_target_dn": float(stats["std_target"].mean(axis=0)[c] * dn_scale[c]),
+            "hf_ratio_mean": float(hf_ratio_mean[c]),
+            "hf_pred_dn": float(stats["hf_pred"].mean(axis=0)[c] * dn_scale[c]),
+            "hf_target_dn": float(stats["hf_target"].mean(axis=0)[c] * dn_scale[c]),
+            "bias_dn": float(bias_dn[c]),
+            "bias_scene_sd_dn": float(bias_scene_sd_dn[c]),
+            "ssim_inactive_target": float(ssim_in_t[c]),
+            "ssim_inactive_pred": float(ssim_in_p[c]),
+        }
+        for c, name in enumerate(BAND_NAMES[:c_out])
+    }
+    centres_np = centres.cpu().numpy()
+    report["psd_frequencies_cpp"] = [float(v) for v in centres_np]
+    report["psd_wavelength_m"] = [float(PIXEL_METRES / v) if v > 0 else None for v in centres_np]
+    report["psd_ratio"] = {
+        name: [float(v) for v in psd_ratio[c]] for c, name in enumerate(BAND_NAMES[:c_out])}
+
+    plot_psd(centres_np, psd_ratio, groups, OUT_DIR)
+    plot_band_bars(BAND_NAMES[:c_out], std_ratio_mean, hf_ratio_mean, bias_dn, OUT_DIR)
+
+    # -------- 3. moment matching --------
+    clamp_frac = dict(zip(clamp_keys, cat["clamped"].mean(axis=0)))
+
+    print("\n(3) moment matching [~ID]")
+    print(f"{'variant':>22} {'rec':>9} {'95% CI':>20} {'clamped':>9}")
+    print("-" * 64)
+    m_labels, m_vals, m_lo, m_hi = [], [], [], []
+    report["moment_matching"] = {}
+    for k in ("level", "contrast", "level+contrast"):
+        p, lo, hi = ci_of(cat[f"moment::{k}"], d_fake, d_real, n, recovery_ratio)
+        flag = "  <-- >1%" if clamp_frac[k] > 0.01 else ""
+        print(f"{k:>22} {p[0]:>8.1%} [{lo[0]:>7.1%},{hi[0]:>7.1%}] {clamp_frac[k]:>8.2%}{flag}")
+        m_labels.append(k)
+        m_vals.append(p[0])
+        m_lo.append(lo[0])
+        m_hi.append(hi[0])
+        report["moment_matching"][k] = {
+            "rec": float(p[0]), "ci": [float(lo[0]), float(hi[0])],
+            "clamped_fraction": float(clamp_frac[k]), "regime": "~ID"}
+
+    p, lo, hi = ci_of(cat["moment::reverse_real_to_fake"], d_fake, d_real, n, degradation_ratio)
+    print(f"{'reverse (real->fake)':>22} {p[0]:>8.1%} [{lo[0]:>7.1%},{hi[0]:>7.1%}] "
+          f"{clamp_frac['reverse_real_to_fake']:>8.2%}   (deg)")
+    report["moment_matching"]["reverse_real_to_fake"] = {
+        "deg": float(p[0]), "ci": [float(lo[0]), float(hi[0])],
+        "clamped_fraction": float(clamp_frac["reverse_real_to_fake"]), "regime": "~ID"}
+
+    plot_moments(m_labels, m_vals, m_lo, m_hi, OUT_DIR)
+
+    # -------- 4. SAR conditioning --------
+    deg_shuf, ds_lo, ds_hi = ci_of(cat["sar_shuf_real"], d_fake, d_real, n, degradation_ratio)
+    deg_mean, dm_lo, dm_hi = ci_of(cat["sar_mean_real"], d_fake, d_real, n, degradation_ratio)
+
+    sal = cat["sal_fake"]
+    share = sal / (sal.sum(axis=1, keepdims=True) + 1e-20)
+    sar_share = share[:, :c_in].sum(axis=1)
+    sh_lo, sh_hi = bootstrap_ci(lambda s: np.array([sar_share[s].mean()]), n)
+
+    print("\n(4) SAR conditioning [ID]")
+    print(f"  D(real_A, real_B)      {d_real.mean():>8.4f}")
+    print(f"  D(shuffled_A, real_B)  {cat['sar_shuf_real'].mean():>8.4f}")
+    print(f"  D(real_A, fake_B)      {d_fake.mean():>8.4f}")
+    print(f"  D(shuffled_A, fake_B)  {cat['sar_shuf_fake'].mean():>8.4f}")
+    print(f"  deg_shuffle            {deg_shuf[0]:>8.1%} [{ds_lo[0]:.1%},{ds_hi[0]:.1%}]")
+    print(f"  deg_sar_mean_only      {deg_mean[0]:>8.1%} [{dm_lo[0]:.1%},{dm_hi[0]:.1%}]")
+    print(f"  VV+VH saliency share   {sar_share.mean():>8.1%} [{sh_lo[0]:.1%},{sh_hi[0]:.1%}]")
+
+    report["sar_conditioning"] = {
+        "d_real_A_real_B": float(d_real.mean()),
+        "d_shuffled_A_real_B": float(cat["sar_shuf_real"].mean()),
+        "d_real_A_fake_B": float(d_fake.mean()),
+        "d_shuffled_A_fake_B": float(cat["sar_shuf_fake"].mean()),
+        "deg_shuffle": float(deg_shuf[0]),
+        "deg_shuffle_ci": [float(ds_lo[0]), float(ds_hi[0])],
+        "deg_sar_mean_only": float(deg_mean[0]),
+        "deg_sar_mean_only_ci": [float(dm_lo[0]), float(dm_hi[0])],
+        "sar_saliency_share": float(sar_share.mean()),
+        "sar_saliency_share_ci": [float(sh_lo[0]), float(sh_hi[0])],
+        "same_scene_violations": int(bad),
+        "regime": "ID",
+    }
+
+    # -------- 5. splice / LOO, relabelled OOD --------
+    recovery, rec_lo, rec_hi = ci_of(cat["splice"], d_fake, d_real, n, recovery_ratio)
+    loo_drop, loo_lo, loo_hi = ci_of(cat["loo"], d_fake, d_real, n, degradation_ratio)
     order = np.argsort(-recovery)
-    print(f"\nSum of the {c_out} single-band recoveries: {recovery.sum():.1%}  "
-          f"(C separate experiments, not a decomposition)")
 
-    # Needs the global ordering, so it cannot share the first pass.
     cum_acc = []
     for start in range(0, len(idx), BATCH):
         sel = idx[start:start + BATCH]
@@ -437,109 +783,121 @@ def main():
         with torch.no_grad():
             fake_B = netG(real_A)
         cum_acc.append(splice_in_cumulative(netD, real_A, fake_B, real_B, order))
-    d_cum = np.concatenate(cum_acc)
+    cum, cum_lo, cum_hi = ci_of(np.concatenate(cum_acc), d_fake, d_real, n, recovery_ratio)
 
-    cum = recovery_ratio(d_cum, d_fake, d_real, full)
-    cum_lo, cum_hi = bootstrap_ci(lambda s: recovery_ratio(d_cum, d_fake, d_real, s), n)
-
-    print("\n(b2c) cumulative splice-in, descending single-band order")
-    print(f"{'k':>3} {'band added':>11} {'recovery':>9} {'95% CI':>18}")
-    print("-" * 45)
-    for k, c in enumerate(order, start=1):
-        print(f"{k:>3} {BAND_NAMES[c]:>11} {cum[k - 1]:>8.1%} "
-              f"[{cum_lo[k - 1]:>6.1%},{cum_hi[k - 1]:>6.1%}]")
-
-    print("\n(b4) blur test on REAL targets: D output, and how far it falls toward fake")
-    print(f"{'group':>6} {'sigma':>6} {'D(blurred real)':>16} {'toward fake':>13} {'95% CI':>18}")
-    print("-" * 64)
-    blur_report = {}
-    for g in groups:
-        for s in BLUR_SIGMAS:
-            b = blur[(g, s)]
-            frac_fn = lambda sel, b=b: 1.0 - recovery_ratio(b[:, None], d_fake, d_real, sel)
-            frac = frac_fn(full)[0]
-            f_lo, f_hi = bootstrap_ci(lambda sel, f=frac_fn: f(sel), n)
-            print(f"{g:>6} {s:>6.1f} {b.mean():>16.4f} {frac:>12.1%} "
-                  f"[{f_lo[0]:>6.1%},{f_hi[0]:>6.1%}]")
-            blur_report[f"{g}_sigma{s}"] = {
-                "d_out": float(b.mean()),
-                "fraction_toward_fake": float(frac),
-                "ci": [float(f_lo[0]), float(f_hi[0])],
-            }
-
-    print("\n(b5) per-band statistics, prediction vs target")
-    print(f"{'band':>5} {'std tgt':>9} {'std pred':>9} {'ratio':>7} | "
-          f"{'hf tgt':>8} {'hf pred':>8} {'ratio':>7} | {'mean err':>9}")
-    print("-" * 74)
-    stats = {}
-    for tag in ("pred", "target"):
-        a = stat_acc[tag]
-        mean = a["sum"] / a["n"]
-        stats[tag] = {
-            "mean": mean,
-            "std": np.sqrt(np.maximum(a["sumsq"] / a["n"] - mean ** 2, 0.0)),
-            "hf_std": np.sqrt(a["hf_sumsq"] / a["n"]),
-        }
+    print("\n(5) splice-in and leave-one-out [OOD]")
+    print(f"{'band':>5} {'splice-in':>22} {'leave-one-out':>22}")
+    print("-" * 52)
     for c, name in enumerate(BAND_NAMES[:c_out]):
-        print(f"{name:>5} {stats['target']['std'][c]:>9.4f} {stats['pred']['std'][c]:>9.4f} "
-              f"{stats['pred']['std'][c] / (stats['target']['std'][c] + 1e-12):>7.2f} | "
-              f"{stats['target']['hf_std'][c]:>8.4f} {stats['pred']['hf_std'][c]:>8.4f} "
-              f"{stats['pred']['hf_std'][c] / (stats['target']['hf_std'][c] + 1e-12):>7.2f} | "
-              f"{stats['pred']['mean'][c] - stats['target']['mean'][c]:>+9.4f}")
+        print(f"{name:>5} {recovery[c]:>9.1%} [{rec_lo[c]:>6.1%},{rec_hi[c]:>6.1%}] "
+              f"{loo_drop[c]:>9.1%} [{loo_lo[c]:>6.1%},{loo_hi[c]:>6.1%}]")
 
-    save_d_maps(netD, first["real_A"], first["fake_B"], first["real_B"],
-                _sar_rgb_from_norm_percentile(first["real_A"]), OUT_DIR, N_PANELS)
-
+    rng_fake, rng_real = save_d_maps(
+        netD, first["real_A"], first["fake_B"], first["real_B"],
+        _sar_rgb_from_norm_percentile(first["real_A"]), OUT_DIR, N_PANELS)
     save_panels(_sar_rgb_from_norm_percentile(first["real_A"]),
                 first["fake_B"].cpu().numpy(), first["real_B"].cpu().numpy(),
                 s2_clip, OUT_DIR, N_PANELS)
 
-    summary = {
-        "model_dir": MODEL_DIR,
-        "netD_file": NETD_FILE,
+    report.update({
+        "run_name": RUN_NAME,
+        "checkpoint": ckpt,
         "split": SPLIT,
+        "seed": SEED,
         "n_patches": int(n),
         "n_boot": N_BOOT,
-        "caveat": (
-            "splice-in and leave-one-out feed D patches that mix real and generated "
-            "bands, which are out of distribution for D; on their own they cannot "
-            "separate a joint cross-band cue from rejection of inconsistent mixtures. "
-            "The blur test does not splice and is the one to trust for 'missing texture'."
-        ),
+        "patch_indices": [int(v) for v in idx],
         "d_out_fake": float(d_fake.mean()),
         "d_out_real": float(d_real.mean()),
-        "sensitivity_raw": {n_: float(v) for n_, v in zip(chan_names, sens_raw)},
-        "sensitivity_std_scaled": {n_: float(v) for n_, v in zip(chan_names, sens_scaled)},
-        "ablation_recovery": {n_: float(v) for n_, v in zip(BAND_NAMES[:c_out], recovery)},
-        "ablation_recovery_ci": {
-            n_: [float(a), float(b)] for n_, a, b in zip(BAND_NAMES[:c_out], rec_lo, rec_hi)},
-        "ablation_recovery_sum": float(recovery.sum()),
-        "ablation_all_bands_check": float(rec_all),
-        "leave_one_out_drop": {n_: float(v) for n_, v in zip(BAND_NAMES[:c_out], loo_drop)},
-        "leave_one_out_drop_ci": {
-            n_: [float(a), float(b)] for n_, a, b in zip(BAND_NAMES[:c_out], loo_lo, loo_hi)},
-        "blur_test": blur_report,
-        "band_stats": {
-            n_: {
-                "std_target": float(stats["target"]["std"][c]),
-                "std_pred": float(stats["pred"]["std"][c]),
-                "std_ratio": float(stats["pred"]["std"][c] / (stats["target"]["std"][c] + 1e-12)),
-                "hf_std_target": float(stats["target"]["hf_std"][c]),
-                "hf_std_pred": float(stats["pred"]["hf_std"][c]),
-                "hf_std_ratio": float(stats["pred"]["hf_std"][c] / (stats["target"]["hf_std"][c] + 1e-12)),
-                "mean_error": float(stats["pred"]["mean"][c] - stats["target"]["mean"][c]),
-            }
-            for c, n_ in enumerate(BAND_NAMES[:c_out])
+        "d_map_range": {"fake": rng_fake, "real": rng_real},
+        "harness_all_bands": float(rec_all),
+        "regime_labels": {
+            "blur_all": "ID", "blur_groups": "OOD", "moment_matching": "~ID",
+            "sar_conditioning": "ID", "splice_in": "OOD", "leave_one_out": "OOD",
+            "cumulative_splice": "OOD", "band_stats": "n/a (no D)",
         },
-        "ablation_order": [BAND_NAMES[c] for c in order],
-        "ablation_cumulative": [float(v) for v in cum],
-        "ablation_cumulative_ci": [
-            [float(a), float(b)] for a, b in zip(cum_lo, cum_hi)],
-    }
-    with open(os.path.join(OUT_DIR, "discriminator_diagnostics.json"), "w") as f:
-        json.dump(summary, f, indent=2)
+        "splice_in": {name: {"rec": float(recovery[c]),
+                             "ci": [float(rec_lo[c]), float(rec_hi[c])]}
+                      for c, name in enumerate(BAND_NAMES[:c_out])},
+        "leave_one_out": {name: {"deg": float(loo_drop[c]),
+                                 "ci": [float(loo_lo[c]), float(loo_hi[c])]}
+                          for c, name in enumerate(BAND_NAMES[:c_out])},
+        "cumulative_order": [BAND_NAMES[c] for c in order],
+        "cumulative_rec": [float(v) for v in cum],
+        "cumulative_ci": [[float(a), float(b)] for a, b in zip(cum_lo, cum_hi)],
+        "saliency_share": {nm: float(v) for nm, v in zip(chan_names, share.mean(axis=0))},
+    })
 
+    with open(os.path.join(OUT_DIR, "d_diagnostics.json"), "w") as f:
+        json.dump(report, f, indent=2)
+
+    write_summary(report, BAND_NAMES[:c_out], OUT_DIR)
     print(f"\nSaved: {OUT_DIR}")
+
+
+def write_summary(r, band_names, out_dir):
+    """Tables only. One line of reading per table; the reviewer draws the conclusions."""
+    ck = r["checkpoint"]
+    L = ["# Discriminator diagnostics\n",
+         f"Run `{r['run_name']}`, {ck['source']} epoch {ck['epoch']}, {r['split']} split, "
+         f"N = {r['n_patches']}, seed {r['seed']}, {r['n_boot']} bootstrap resamples.\n",
+         f"Harness (all bands spliced): {r['harness_all_bands']:.2%}. "
+         f"D(real) {r['d_out_real']:.4f}, D(fake) {r['d_out_fake']:.4f}.\n"]
+
+    L.append("\n## 1. Blur sweep, all bands (ID)\n")
+    L.append("| sigma (px) | deg | 95% CI |")
+    L.append("|---|---|---|")
+    for k, v in r["blur_all"].items():
+        L.append(f"| {k.replace('sigma', '')} | {v['deg']:.1%} | "
+                 f"[{v['ci'][0]:.1%}, {v['ci'][1]:.1%}] |")
+    star = r["blur_sigma_star"]
+    L.append(f"\nReaches 99% at sigma = {star}." if star
+             else f"\nDoes not reach 99%; plateau {r['blur_plateau']:.1%}.")
+
+    L.append("\n## 2. Moment matching (~ID)\n")
+    L.append("| variant | rec / deg | 95% CI | clamped |")
+    L.append("|---|---|---|---|")
+    for k, v in r["moment_matching"].items():
+        val = v.get("rec", v.get("deg"))
+        L.append(f"| {k} | {val:.1%} | [{v['ci'][0]:.1%}, {v['ci'][1]:.1%}] | "
+                 f"{v['clamped_fraction']:.2%} |")
+    L.append("\nLast row is the reverse direction and is a degradation, not a recovery.")
+
+    s = r["sar_conditioning"]
+    L.append("\n## 3. SAR conditioning (ID)\n")
+    L.append("| quantity | value |")
+    L.append("|---|---|")
+    for k in ("d_real_A_real_B", "d_shuffled_A_real_B", "d_real_A_fake_B", "d_shuffled_A_fake_B"):
+        L.append(f"| {k} | {s[k]:.4f} |")
+    L.append(f"| deg_shuffle | {s['deg_shuffle']:.1%} "
+             f"[{s['deg_shuffle_ci'][0]:.1%}, {s['deg_shuffle_ci'][1]:.1%}] |")
+    L.append(f"| deg_sar_mean_only | {s['deg_sar_mean_only']:.1%} |")
+    L.append(f"| VV+VH saliency share | {s['sar_saliency_share']:.1%} "
+             f"[{s['sar_saliency_share_ci'][0]:.1%}, {s['sar_saliency_share_ci'][1]:.1%}] |")
+    L.append(f"\nSAR was deranged across scenes; "
+             f"{s['same_scene_violations']} same-scene violations.")
+
+    L.append("\n## 4. Band statistics (no discriminator)\n")
+    L.append("| band | std ratio (mean) | (median) | HF ratio | bias DN | sd(bias) DN |")
+    L.append("|---|---|---|---|---|---|")
+    for nm in band_names:
+        b = r["band_stats"][nm]
+        L.append(f"| {nm} | {b['std_ratio_mean']:.3f} | {b['std_ratio_median']:.3f} | "
+                 f"{b['hf_ratio_mean']:.3f} | {b['bias_dn']:+.1f} | {b['bias_scene_sd_dn']:.1f} |")
+    L.append("\nRatios are per patch then averaged; std ratios are identical in DN and "
+             "normalized units because the band scaling is affine.")
+
+    L.append("\n## 5. SSIM window sensitivity\n")
+    L.append("| band | windows below sqrt(C2), target | prediction |")
+    L.append("|---|---|---|")
+    for nm in band_names:
+        b = r["band_stats"][nm]
+        L.append(f"| {nm} | {b['ssim_inactive_target']:.1%} | {b['ssim_inactive_pred']:.1%} |")
+    L.append(f"\nFraction of 11x11 Gaussian windows (sigma {SSIM_WIN_SIGMA}) with local std "
+             f"below {SSIM_C2_SQRT} in normalized units.")
+
+    with open(os.path.join(out_dir, "d_diagnostics_summary.md"), "w") as f:
+        f.write("\n".join(L) + "\n")
 
 
 if __name__ == "__main__":
