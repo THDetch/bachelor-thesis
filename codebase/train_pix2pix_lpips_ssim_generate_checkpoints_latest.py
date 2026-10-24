@@ -31,6 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from myutils import get_train_val_loaders, save_monitor_samples
+from arm_probe import load_probe, run_probe
 
 
 # -----------------------------------------------------------------------------
@@ -74,7 +75,14 @@ set_seed(seed)
 # -----------------------------------------------------------------------------
 input_channel_select = None  # 0, 1, or None for all S1 channels
 
-epochs = 100
+# -----------------------------------------------------------------------------
+# Experiment arm
+# -----------------------------------------------------------------------------
+# A_base: current D (InstanceNorm + spectral norm), no extra term -> reference arm.
+# Later arms change exactly one thing each; see success_criteria.md.
+arm = "A_base"
+
+epochs = 20
 batch_size = 16
 
 # G and D start with the same LR.
@@ -110,7 +118,7 @@ allow_resume = False
 data_dir = "dataset_all_seasons_scenesplit"
 
 model_name = "pix2pix"
-run_name = "baseline_scenesplit_sn"
+run_name = f"arm_{arm}"
 save_dir = f"trained_{run_name}/{model_name}"
 
 
@@ -131,6 +139,13 @@ grad_probe_every = 200
 # Keep a snapshot every N epochs so post-hoc diagnostics can compare early vs late
 # training. Best-model files alone only ever show the converged state. 0 disables.
 checkpoint_every = 5
+
+# Fixed validation patches for the per-epoch probe, identical across arms.
+probe_n = 128
+
+# An arm already below this by the given epoch has lost; stop burning GPU on it.
+early_abort_epoch = 15
+early_abort_d_out_fake = 0.02
 
 
 
@@ -317,6 +332,76 @@ print(f"Discriminator parameter count: {param_count_D:,}")
 
 
 # -----------------------------------------------------------------------------
+# Startup assertions: fail before burning GPU time on a misbuilt arm
+# -----------------------------------------------------------------------------
+NORM_TYPES = (torch.nn.modules.batchnorm._BatchNorm, torch.nn.InstanceNorm2d,
+              torch.nn.GroupNorm, torch.nn.LayerNorm)
+
+
+def _has_spectral_norm(m):
+    # The fork uses the pre-parametrization API, which renames weight -> weight_orig.
+    if hasattr(m, "weight_orig"):
+        return True
+    try:
+        return torch.nn.utils.parametrize.is_parametrized(m, "weight")
+    except (AttributeError, ValueError):
+        return False
+
+
+def _sn_weight(m):
+    if hasattr(m, "weight_orig"):
+        return m.weight_orig
+    return m.parametrizations.weight.original
+
+
+def check_arm_networks():
+    print(f"\n[ARM {arm}] discriminator\n{netD}")
+
+    convs = [m for m in netD.modules() if isinstance(m, torch.nn.Conv2d)]
+    assert convs, "no Conv2d found in netD"
+
+    for i, m in enumerate(convs):
+        if use_spectral_norm:
+            assert _has_spectral_norm(m), f"conv {i} is missing spectral norm"
+        assert m.bias is not None, f"conv {i} has no bias"
+
+    norms = [m for m in netD.modules() if isinstance(m, NORM_TYPES)]
+    expect_norm = arm in ("A_base", "A0")
+    assert bool(norms) == expect_norm, (
+        f"arm {arm} expects norm layers in D: {expect_norm}, found {len(norms)}")
+
+    assert param_count_D == 2_777_025, (
+        f"netD has {param_count_D:,} parameters, expected 2,777,025; "
+        "the arms must differ only by their norm modules")
+
+    stds = [float(_sn_weight(m).std()) for m in convs] if use_spectral_norm \
+        else [float(m.weight.std()) for m in convs]
+    print("[ARM] conv weight std (init N(0, 0.02), applied before SN): "
+          + ", ".join(f"{s:.4f}" for s in stds))
+    assert all(0.012 < s < 0.030 for s in stds), f"init std out of range: {stds}"
+
+    g_norms = [m for m in netG.modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)]
+    assert g_norms, "netG is expected to use BatchNorm"
+
+    print(f"[ARM] D convs {len(convs)}, norm modules {len(norms)}, "
+          f"params {param_count_D:,}; G BatchNorm layers {len(g_norms)}  OK")
+
+
+check_arm_networks()
+
+
+# -----------------------------------------------------------------------------
+# Fixed probe patches. Sliced from the memmaps, never through a DataLoader: creating
+# a loader iterator draws from the global RNG and would shift the training shuffle.
+# -----------------------------------------------------------------------------
+probe = load_probe(data_dir, "val", n=probe_n, channel_select=input_channel_select)
+
+print(f"[PROBE] {len(probe['indices'])} fixed val patches, "
+      f"{probe['n_scenes']} scenes, "
+      f"{probe['same_scene_violations']} same-scene SAR violations")
+
+
+# -----------------------------------------------------------------------------
 # Logging / Saving
 # -----------------------------------------------------------------------------
 os.makedirs(save_dir, exist_ok=True)
@@ -333,11 +418,17 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 config = {
+    "arm": arm,
     "epochs": epochs,
     "batch_size": batch_size,
     "seed": seed,
     "grad_probe_every": grad_probe_every,
     "checkpoint_every": checkpoint_every,
+    "probe_n": probe_n,
+    "probe_indices": [int(v) for v in probe["indices"]],
+    "probe_same_scene_violations": probe["same_scene_violations"],
+    "early_abort_epoch": early_abort_epoch,
+    "early_abort_d_out_fake": early_abort_d_out_fake,
     "lr_initial_G": lr_G,
     "lr_initial_D": lr_D,
     "use_lr_decay": use_lr_decay,
@@ -405,6 +496,16 @@ history = {
 
     # How much of G's gradient comes from the adversarial term
     "train_gan_l1_grad_ratio": [],
+    "train_gan_l1_grad_ratio_param": [],
+
+    # Fixed validation patches, identical across arms
+    "probe_D_out_real": [],
+    "probe_D_out_fake": [],
+    "probe_hf_ratio": [],
+    "probe_std_ratio": [],
+    "probe_deg_shuffle": [],
+    "probe_deg_shuffle_lo": [],
+    "probe_deg_shuffle_hi": [],
 
     # Validation
     "val_L1": [],
@@ -542,6 +643,11 @@ def set_requires_grad(net, flag: bool):
         p.requires_grad = flag
 
 
+def _total_grad_norm(grads):
+    sq = [g.detach().pow(2).sum() for g in grads if g is not None]
+    return float(torch.sqrt(torch.stack(sq).sum())) if sq else 0.0
+
+
 def nhwc_to_nchw(x: torch.Tensor) -> torch.Tensor:
     return x.permute(0, 3, 1, 2)
 
@@ -668,13 +774,47 @@ def save_detailed_training_plots():
         x,
         [
             history["train_gan_l1_grad_ratio"],
+            history["train_gan_l1_grad_ratio_param"],
         ],
         [
-            "||grad GAN|| / ||grad L1||",
+            "||grad GAN|| / ||grad L1|| at fake_B",
+            "same ratio over G parameters",
         ],
-        "Share of G Gradient Coming From the Discriminator",
+        "GAN/L1 Gradient Norm Ratio",
         "Gradient norm ratio",
         "gan_l1_gradient_ratio.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["probe_hf_ratio"],
+            history["probe_std_ratio"],
+        ],
+        [
+            "land-band HF std ratio",
+            "within-patch std ratio",
+        ],
+        "Generator Detail vs Target (128 fixed val patches)",
+        "pred / target",
+        "probe_detail_ratios.png",
+    )
+
+    plot_curve(
+        x,
+        [
+            history["probe_deg_shuffle"],
+            history["probe_deg_shuffle_lo"],
+            history["probe_deg_shuffle_hi"],
+        ],
+        [
+            "deg_shuffle",
+            "95% CI low",
+            "95% CI high",
+        ],
+        "Does D Use the SAR Condition? (0 = ignores it)",
+        "degradation toward fake",
+        "probe_deg_shuffle.png",
     )
 
     plot_curve(
@@ -794,6 +934,7 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
     grad_ratio_sum = 0.0
     grad_ratio_count = 0
+    grad_ratio_param_sum = 0.0
 
     num_samples_seen = 0
 
@@ -958,6 +1099,18 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                     )[0].norm().item()
 
                     grad_ratio_sum += grad_gan / (grad_l1 + 1e-12)
+
+                    # The ratio at fake_B says nothing about how much survives backprop
+                    # into the weights, which is what the optimizer actually steps on.
+                    g_params = [p for p in netG.parameters() if p.requires_grad]
+                    p_gan = _total_grad_norm(torch.autograd.grad(
+                        lambda_GAN * loss_G_GAN, g_params,
+                        retain_graph=True, allow_unused=True))
+                    p_l1 = _total_grad_norm(torch.autograd.grad(
+                        loss_G_L1_weighted, g_params,
+                        retain_graph=True, allow_unused=True))
+
+                    grad_ratio_param_sum += p_gan / (p_l1 + 1e-12)
                     grad_ratio_count += 1
 
                 loss_G.backward()
@@ -1059,6 +1212,10 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
         grad_ratio_sum / grad_ratio_count if grad_ratio_count > 0 else None
     )
 
+    train_grad_ratio_param = (
+        grad_ratio_param_sum / grad_ratio_count if grad_ratio_count > 0 else None
+    )
+
 
     # -----------------------------------------------------------------------------
     # Validation
@@ -1129,6 +1286,10 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
     val_total = compute_val_total(val_l1, val_ssim, val_lpips)
 
+    # Fixed probe patches. Runs eval-mode under no_grad and restores the previous modes:
+    # a train-mode forward would advance spectral norm's power iteration and change D.
+    probe_metrics = run_probe(netG, netD, probe, device, batch=batch_size)
+
 
     # -----------------------------------------------------------------------------
     # LR scheduling: G and D decay together
@@ -1168,6 +1329,10 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     history["train_D_out_real"].append(train_D_out_real)
     history["train_D_out_fake"].append(train_D_out_fake)
     history["train_gan_l1_grad_ratio"].append(train_grad_ratio)
+    history["train_gan_l1_grad_ratio_param"].append(train_grad_ratio_param)
+
+    for k, v in probe_metrics.items():
+        history[k].append(v)
 
     history["val_L1"].append(val_l1)
     history["val_SSIM"].append(val_ssim)
@@ -1210,6 +1375,18 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
     if train_grad_ratio is not None:
         summary += f" | GAN/L1 grad: {train_grad_ratio:.4f}"
+
+    if train_grad_ratio_param is not None:
+        summary += f" | GAN/L1 grad (param): {train_grad_ratio_param:.4f}"
+
+    summary += (
+        f" | probe D(f): {probe_metrics['probe_D_out_fake']:.4f}"
+        f" | HF: {probe_metrics['probe_hf_ratio']:.4f}"
+        f" | std: {probe_metrics['probe_std_ratio']:.4f}"
+        f" | deg_shuffle: {probe_metrics['probe_deg_shuffle']:.4f}"
+        f" [{probe_metrics['probe_deg_shuffle_lo']:.4f},"
+        f"{probe_metrics['probe_deg_shuffle_hi']:.4f}]"
+    )
 
     tqdm.write("\n" + summary)
     logger.info(summary)
@@ -1291,6 +1468,13 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     save_history_csv()
     save_history_json()
     save_detailed_training_plots()
+
+    if (epoch + 1) >= early_abort_epoch and train_D_out_fake < early_abort_d_out_fake:
+        msg = (f"[ABORT] arm {arm}: D_out_fake {train_D_out_fake:.5f} < "
+               f"{early_abort_d_out_fake} at epoch {epoch + 1}; this arm has failed.")
+        tqdm.write(msg)
+        logger.info(msg)
+        break
 
 
 # -----------------------------------------------------------------------------
