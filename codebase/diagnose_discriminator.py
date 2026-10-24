@@ -895,11 +895,25 @@ def main():
 def write_summary(r, band_names, out_dir):
     """Tables only. One line of reading per table; the reviewer draws the conclusions."""
     ck = r["checkpoint"]
+    bs = r["band_stats"]
+
+    dev = {n: abs(bs[n]["var_ratio_spectra"] / (bs[n]["var_ratio_pixels"] + 1e-20) - 1.0)
+           for n in band_names}
+    worst = max(dev, key=dev.get)
+
     L = ["# Discriminator diagnostics\n",
          f"Run `{r['run_name']}`, {ck['source']} epoch {ck['epoch']}, {r['split']} split, "
          f"N = {r['n_patches']}, seed {r['seed']}, {r['n_boot']} bootstrap resamples.\n",
-         f"Harness (all bands spliced): {r['harness_all_bands']:.2%}. "
-         f"D(real) {r['d_out_real']:.4f}, D(fake) {r['d_out_fake']:.4f}.\n"]
+         "\n## 0. Checks\n",
+         "| check | value |",
+         "|---|---|",
+         f"| harness, all bands spliced | {r['harness_all_bands']:.2%} (must be 100%) |",
+         f"| D(real) / D(fake) | {r['d_out_real']:.4f} / {r['d_out_fake']:.4f} |",
+         f"| Parseval, worst band | {worst} at {dev[worst]:.1%} "
+         f"({bs[worst]['var_ratio_spectra']:.4f} vs {bs[worst]['var_ratio_pixels']:.4f}) |",
+         f"| instance_noise_sigma0 | {r['instance_noise_sigma0']:.6f} |",
+         "\nParseval compares the variance ratio from the binned spectra against the one "
+         "from pixels; the spectra are Hann-windowed, so a few percent is expected."]
 
     L.append("\n## 1. Blur sweep, all bands (ID)\n")
     L.append("| sigma (px) | deg | 95% CI |")
@@ -910,6 +924,14 @@ def write_summary(r, band_names, out_dir):
     star = r["blur_sigma_star"]
     L.append(f"\nReaches 99% at sigma = {star}." if star
              else f"\nDoes not reach 99%; plateau {r['blur_plateau']:.1%}.")
+
+    L.append("\n### 1b. Per-group blur (OOD)\n")
+    L.append("| group | sigma | deg | 95% CI |")
+    L.append("|---|---|---|---|")
+    for k, v in r["blur_groups"].items():
+        g, s = k.split("_sigma")
+        L.append(f"| {g} | {s} | {v['deg']:.1%} | [{v['ci'][0]:.1%}, {v['ci'][1]:.1%}] |")
+    L.append("\nMixed real and blurred bands are out of distribution for D.")
 
     L.append("\n## 2. Moment matching (~ID)\n")
     L.append("| variant | rec / deg | 95% CI | clamped |")
@@ -935,23 +957,42 @@ def write_summary(r, band_names, out_dir):
              f"{s['same_scene_violations']} same-scene violations.")
 
     L.append("\n## 4. Band statistics (no discriminator)\n")
-    L.append("| band | std ratio (mean) | (median) | HF ratio | bias DN | sd(bias) DN |")
-    L.append("|---|---|---|---|---|---|")
+    L.append("| band | std ratio (mean) | (median) | HF ratio | bias DN | sd(bias) DN "
+             "| sd(target mu) DN | R2(patch mu) |")
+    L.append("|---|---|---|---|---|---|---|---|")
     for nm in band_names:
-        b = r["band_stats"][nm]
+        b = bs[nm]
         L.append(f"| {nm} | {b['std_ratio_mean']:.3f} | {b['std_ratio_median']:.3f} | "
-                 f"{b['hf_ratio_mean']:.3f} | {b['bias_dn']:+.1f} | {b['bias_scene_sd_dn']:.1f} |")
-    L.append("\nRatios are per patch then averaged; std ratios are identical in DN and "
-             "normalized units because the band scaling is affine.")
+                 f"{b['hf_ratio_mean']:.3f} | {b['bias_dn']:+.1f} | {b['bias_scene_sd_dn']:.1f} | "
+                 f"{b['target_patch_mean_sd_dn']:.1f} | {b['patch_mean_r2']:.3f} |")
+    L.append("\nR2 is of the per-patch band mean; sd(target mu) is the reference it is "
+             "measured against. Std ratios are identical in DN and normalized units.")
 
-    L.append("\n## 5. SSIM window sensitivity\n")
-    L.append("| band | windows below sqrt(C2), target | prediction |")
-    L.append("|---|---|---|")
+    L.append("\n## 5. SSIM window sensitivity and local detail\n")
+    L.append("| band | windows below sqrt(C2), target | prediction | "
+             "median local std, target | prediction |")
+    L.append("|---|---|---|---|---|")
     for nm in band_names:
-        b = r["band_stats"][nm]
-        L.append(f"| {nm} | {b['ssim_inactive_target']:.1%} | {b['ssim_inactive_pred']:.1%} |")
+        b = bs[nm]
+        L.append(f"| {nm} | {b['ssim_inactive_target']:.1%} | {b['ssim_inactive_pred']:.1%} | "
+                 f"{b['local_std_target']:.5f} | {b['local_std_pred']:.5f} |")
     L.append(f"\nFraction of 11x11 Gaussian windows (sigma {SSIM_WIN_SIGMA}) with local std "
-             f"below {SSIM_C2_SQRT} in normalized units.")
+             f"below {SSIM_C2_SQRT} in normalized units; sigma0 is the median of the land bands.")
+
+    L.append("\n## 6. Power-spectrum ratio, PSD(pred)/PSD(target)\n")
+    freqs = r["psd_frequencies_cpp"]
+    wl = r["psd_wavelength_m"]
+    picks = [0, len(freqs) // 6, len(freqs) // 3, len(freqs) // 2,
+             2 * len(freqs) // 3, 5 * len(freqs) // 6, len(freqs) - 1]
+    L.append("| group | " + " | ".join(f"{wl[i]:.0f} m" for i in picks) + " |")
+    L.append("|---" * (len(picks) + 1) + "|")
+    for g, idxs in BAND_GROUPS.items():
+        names = [BAND_NAMES[i] for i in idxs if BAND_NAMES[i] in r["psd_ratio"]]
+        if not names:
+            continue
+        vals = [sum(r["psd_ratio"][b][i] for b in names) / len(names) for i in picks]
+        L.append(f"| {g} | " + " | ".join(f"{v:.3f}" for v in vals) + " |")
+    L.append(f"\n{r['psd_ratio_note']}; per-band curves are in the JSON.")
 
     with open(os.path.join(out_dir, "d_diagnostics_summary.md"), "w") as f:
         f.write("\n".join(L) + "\n")
