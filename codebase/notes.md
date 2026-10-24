@@ -89,3 +89,28 @@ sigma* (deg >= 99%): None   plateau: 98.1%
   B11      3.6% [  2.6%,  4.7%]      0.6% [  0.3%,  0.9%]
   B12      5.7% [  4.3%,  7.3%]      0.2% [  0.1%,  0.4%]
 D map range   fake [-0.0469, 0.0511]   real [0.2940, 1.0853]
+
+[ARM A_base] discriminator
+NLayerDiscriminator(
+  (model): Sequential(
+    (0): Conv2d(15, 64, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1))
+    (1): LeakyReLU(negative_slope=0.2, inplace=True)
+    (2): Conv2d(64, 128, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1))
+    (3): InstanceNorm2d(128, eps=1e-05, momentum=0.1, affine=False, track_running_stats=False)
+    (4): LeakyReLU(negative_slope=0.2, inplace=True)
+    (5): Conv2d(128, 256, kernel_size=(4, 4), stride=(2, 2), padding=(1, 1))
+    (6): InstanceNorm2d(256, eps=1e-05, momentum=0.1, affine=False, track_running_stats=False)
+    (7): LeakyReLU(negative_slope=0.2, inplace=True)
+    (8): Conv2d(256, 512, kernel_size=(4, 4), stride=(1, 1), padding=(1, 1))
+    (9): InstanceNorm2d(512, eps=1e-05, momentum=0.1, affine=False, track_running_stats=False)
+    (10): LeakyReLU(negative_slope=0.2, inplace=True)
+    (11): Conv2d(512, 1, kernel_size=(4, 4), stride=(1, 1), padding=(1, 1))
+  )
+)
+[ARM] conv weight std (init N(0, 0.02), applied before SN): 0.0203, 0.0199, 0.0200, 0.0200, 0.0200
+[ARM] D convs 5, norm modules 3, params 2,777,025; G BatchNorm layers 13  OK
+[PROBE] 128 fixed val patches, 29 scenes, 0 same-scene SAR violations
+[RESUME] Disabled by config (allow_resume=False). Starting fresh.
+Training:   0%|                                                                                                 | 0/20 [00:00<?, ?epoch/s]
+Epoch 1:   6%| | 90/1606 [00:15<04:06,  6.14batch/s, G=14.774, D=0.179, D(f)=0.445, GAN=0.531, L1=14.243, SSIM=off, LPIPS=off, lrG=1.00e-0
+[training_0:python*                                                                                          "DEGGS111PC16" 19:10 24-Oct-26
