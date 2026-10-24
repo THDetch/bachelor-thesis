@@ -116,6 +116,9 @@ def _bootstrap_deg(d_real, d_fake, d_shuf, n_boot=N_BOOT, seed=BOOT_SEED, alpha=
 def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
     """Discriminator and generator statistics on the fixed probe patches.
 
+    Returns the per-epoch aggregates plus the raw per-patch D scores, which criterion C
+    pools across epochs before bootstrapping.
+
     d_noise, when given, is applied to the optical channels of every D input so the
     probe sees the same input distribution D was trained on.
     """
@@ -169,7 +172,7 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
             "probe_deg_shuffle": float(deg),
             "probe_deg_shuffle_lo": ci_lo,
             "probe_deg_shuffle_hi": ci_hi,
-        }
+        }, {"d_real": d_real, "d_fake": d_fake, "d_shuf": d_shuf}
     finally:
         netG.train(modes[0])
         netD.train(modes[1])

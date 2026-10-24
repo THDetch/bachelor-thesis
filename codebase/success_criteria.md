@@ -21,16 +21,41 @@ checkpoint every 5 epochs, new run directory per arm, auto-resume off.
 
 | id | criterion | threshold | A_base (reference run) |
 |---|---|---|---|
-| S1 | D not saturated | mean `D_out_fake` >= 0.10 **and** mean `D_loss` >= 0.02, over epochs 11-20 | 0.0329 / 0.0161 |
-| S2 | G_GAN not pinned | mean `G_GAN` <= 0.90, over epochs 11-20 | 0.9614 |
-| S3 | no drift into collapse | `D_out_fake`(20) >= 0.5 x `D_out_fake`(10) | 0.367 |
-| T | texture | `probe_hf_ratio` at epoch 20 >= 0.25 **and** >= A_base + 0.05 | to be measured |
-| F | fidelity | full-val `val_L1` at epoch 20 <= 1.10 x A_base | 0.07383 |
-| C | conditional | `probe_deg_shuffle` at epoch 20 >= 0.10 and CI lower bound > 0 | 0.0022 (epoch 100) |
+| S1 | D not saturated | mean `D_out_fake` >= 0.10 **and** mean `D_loss` >= 0.02, over epochs 11-20 | 0.0329 / 0.0162 |
+| S2 | G_GAN not pinned | mean `G_GAN` <= 0.90, over epochs 11-20 | 0.9621 |
+| S3 | no drift into collapse | mean `D_out_fake`(18-20) / mean `D_out_fake`(9-11) >= 0.50 | 0.302 |
+| T | texture | mean `probe_hf_ratio`(18-20) >= A_base + 0.05 | 0.4347 (bar: 0.4847) |
+| F | fidelity | mean full-val `val_L1`(18-20) <= 1.10 x A_base, same window | 0.07755 (limit: 0.08531) |
+| C | conditional | per-patch `deg_shuffle` pooled over epochs 18-20, then bootstrapped: >= 0.10 and CI lower bound > 0 | 0.0218 |
 
-S1, S2, S3 use the training-time epoch averages in `history.csv`.
+S1 and S2 use the training-time epoch averages in `history.csv`.
 T and C use the 128 fixed validation patches, identical indices in every arm.
 F uses the full validation split, unchanged from the reference run.
+
+### Amendment, 2026-10-24
+
+Decided after A_base finished and **before any treatment arm was launched**.
+
+A_base reproduced the reference run's epochs 11-20 mean `D_out_fake` to within 0.07%
+and hit `D_out_fake` < 0.05 in the same epoch, but individual epochs differ by up to
+24%. The run is not bit-deterministic: `cudnn.deterministic=True` constrains cuDNN
+convolutions only, not the other non-deterministic CUDA reductions in the graph.
+
+Four criteria originally read a single epoch, which at that noise level is not a
+stable estimator - S3 scored 0.367 on the reference run and 0.249 on A_base for the
+same configuration, half the distance to its own threshold. The thresholds and
+definitions are unchanged; only the estimator is now a windowed mean:
+
+- S3: mean(18-20) / mean(9-11)
+- T: mean(18-20), and the absolute 0.25 clause is dropped - A_base sits at 0.43,
+  so every arm would have cleared it and the clause carried no information
+- F: mean(18-20)
+- C: per-patch scores pooled across epochs 18-20, then bootstrapped
+
+C is evaluated against an absolute threshold, so it needs no A_base reference. A_base
+itself ran before per-patch scores were persisted, so its C figure above is the mean of
+the three per-epoch point estimates rather than a pooled bootstrap. It is 0.0218
+against a 0.10 bar, so the estimator makes no difference to the verdict.
 
 In A0 and A3 the S1 D-loss figure is `0.5 * (L_real + L_fake)` only; `L_mismatch` is
 logged separately so the number stays comparable across arms. `D_out_fake` is always

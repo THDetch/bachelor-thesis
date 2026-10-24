@@ -31,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from myutils import get_train_val_loaders, save_monitor_samples
-from arm_probe import load_probe, run_probe
+from arm_probe import load_probe, run_probe, _load_scene_ids
 
 
 # -----------------------------------------------------------------------------
@@ -80,7 +80,16 @@ input_channel_select = None  # 0, 1, or None for all S1 channels
 # -----------------------------------------------------------------------------
 # A_base: current D (InstanceNorm + spectral norm), no extra term -> reference arm.
 # Later arms change exactly one thing each; see success_criteria.md.
-arm = "A_base"
+arm = "A0"
+
+# norm="none" would also switch off conv bias, because NLayerDiscriminator derives
+# use_bias from the norm layer's type. Build with InstanceNorm and strip it instead.
+strip_norm_from_D = arm in ("A1", "A2", "A3")
+
+# Mismatched pair (wrong SAR, real optical) labelled fake, so the condition becomes the
+# only thing separating it from the real pair. Additive: the original terms keep their
+# weights and the logged D loss stays the two-term form.
+use_mismatch = arm in ("A0", "A3")
 
 epochs = 20
 batch_size = 16
@@ -209,11 +218,12 @@ train_loader, val_loader = get_train_val_loaders(
     batch_size=batch_size,
     channel_select=input_channel_select,
     drop_last=True,   # a ragged final batch gives noisy BatchNorm statistics
+    return_index=use_mismatch,
 )
 
-monitor_batch_X, monitor_batch_y = next(iter(val_loader))
-monitor_batch_X = monitor_batch_X[:8].cpu()
-monitor_batch_y = monitor_batch_y[:8].cpu()
+monitor_batch = next(iter(val_loader))
+monitor_batch_X = monitor_batch[0][:8].cpu()
+monitor_batch_y = monitor_batch[1][:8].cpu()
 
 samples_dir = os.path.join(save_dir, "samples")
 os.makedirs(samples_dir, exist_ok=True)
@@ -254,6 +264,13 @@ netD = define_D(
     netD="basic",
     norm=norm_D,
 )
+
+if strip_norm_from_D:
+    for module in netD.modules():
+        for child_name, child in list(module.named_children()):
+            if isinstance(child, torch.nn.InstanceNorm2d):
+                setattr(module, child_name, torch.nn.Identity())
+
 netD = init_net(netD, init_type="normal", init_gain=0.02)
 
 if use_spectral_norm:
@@ -396,9 +413,17 @@ check_arm_networks()
 # -----------------------------------------------------------------------------
 probe = load_probe(data_dir, "val", n=probe_n, channel_select=input_channel_select)
 
+probe_scores_dir = os.path.join(save_dir, "probe_scores")
+os.makedirs(probe_scores_dir, exist_ok=True)
+
 print(f"[PROBE] {len(probe['indices'])} fixed val patches, "
       f"{probe['n_scenes']} scenes, "
       f"{probe['same_scene_violations']} same-scene SAR violations")
+
+# Scene id per training patch, used only to report how often roll(1) pairs a patch with
+# one from its own scene. Such a pair is a weak negative, not a wrong one.
+train_scenes = (_load_scene_ids(data_dir, "train", len(train_loader.dataset))
+                if use_mismatch else None)
 
 
 # -----------------------------------------------------------------------------
@@ -419,6 +444,8 @@ logger = logging.getLogger()
 
 config = {
     "arm": arm,
+    "strip_norm_from_D": strip_norm_from_D,
+    "use_mismatch": use_mismatch,
     "epochs": epochs,
     "batch_size": batch_size,
     "seed": seed,
@@ -491,8 +518,11 @@ history = {
     "train_D_loss": [],
     "train_D_real": [],
     "train_D_fake": [],
+    "train_D_mismatch": [],
     "train_D_out_real": [],
     "train_D_out_fake": [],
+    "train_D_out_mismatch": [],
+    "train_mismatch_same_scene_frac": [],
 
     # How much of G's gradient comes from the adversarial term
     "train_gan_l1_grad_ratio": [],
@@ -929,8 +959,11 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     train_D_loss_sum = 0.0
     train_D_real_sum = 0.0
     train_D_fake_sum = 0.0
+    train_D_mismatch_sum = 0.0
     train_D_out_real_sum = 0.0
     train_D_out_fake_sum = 0.0
+    train_D_out_mismatch_sum = 0.0
+    same_scene_sum = 0
 
     grad_ratio_sum = 0.0
     grad_ratio_count = 0
@@ -946,7 +979,16 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
         position=1,
     ) as batch_pbar:
 
-        for real_A, real_B in batch_pbar:
+        for batch in batch_pbar:
+            if use_mismatch:
+                real_A, real_B, batch_idx = batch
+                partner = batch_idx.roll(1, 0)
+                same_scene_sum += sum(
+                    train_scenes[int(a)] == train_scenes[int(b)]
+                    for a, b in zip(batch_idx.tolist(), partner.tolist()))
+            else:
+                real_A, real_B = batch
+
             real_A = real_A.to(device)
             real_B = real_B.to(device)
 
@@ -970,8 +1012,10 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
                 running_D_loss = 0.0
                 running_D_real = 0.0
                 running_D_fake = 0.0
+                running_D_mismatch = 0.0
                 running_D_out_real = 0.0
                 running_D_out_fake = 0.0
+                running_D_out_mismatch = 0.0
 
                 for d_step in range(d_steps_per_iter):
                     optimizer_D.zero_grad()
@@ -992,36 +1036,59 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
                     loss_D_real = criterionGAN_D(pred_real, True)
                     loss_D_fake = criterionGAN_D(pred_fake, False)
+
+                    loss_D_mismatch = torch.tensor(0.0, device=device)
+                    pred_mismatch_mean = 0.0
+
+                    if use_mismatch:
+                        # Real optical, wrong SAR. Roll rather than randperm so no
+                        # sample can be paired with itself.
+                        pred_mismatch = netD(
+                            torch.cat((real_A.roll(1, 0), real_B), -1).permute(0, 3, 1, 2)
+                        )
+                        loss_D_mismatch = criterionGAN_D(pred_mismatch, False)
+                        pred_mismatch_mean = pred_mismatch.mean().item()
+
+                    # Logged D loss keeps the two-term form so it stays comparable
+                    # across arms; the mismatch term is added only for the update.
                     loss_D = 0.5 * (loss_D_real + loss_D_fake)
 
-                    loss_D.backward()
+                    (loss_D + 0.5 * loss_D_mismatch).backward()
                     optimizer_D.step()
 
                     running_D_loss += loss_D.item()
                     running_D_real += loss_D_real.item()
                     running_D_fake += loss_D_fake.item()
+                    running_D_mismatch += loss_D_mismatch.item()
                     running_D_out_real += pred_real.mean().item()
                     running_D_out_fake += pred_fake.mean().item()
+                    running_D_out_mismatch += pred_mismatch_mean
 
                 avg_D_loss = running_D_loss / d_steps_per_iter
                 avg_D_real = running_D_real / d_steps_per_iter
                 avg_D_fake = running_D_fake / d_steps_per_iter
+                avg_D_mismatch = running_D_mismatch / d_steps_per_iter
                 avg_D_out_real = running_D_out_real / d_steps_per_iter
                 avg_D_out_fake = running_D_out_fake / d_steps_per_iter
+                avg_D_out_mismatch = running_D_out_mismatch / d_steps_per_iter
 
                 train_D_loss_sum += avg_D_loss * bsz
                 train_D_real_sum += avg_D_real * bsz
                 train_D_fake_sum += avg_D_fake * bsz
+                train_D_mismatch_sum += avg_D_mismatch * bsz
                 train_D_out_real_sum += avg_D_out_real * bsz
                 train_D_out_fake_sum += avg_D_out_fake * bsz
+                train_D_out_mismatch_sum += avg_D_out_mismatch * bsz
 
             else:
                 set_requires_grad(netD, False)
                 avg_D_loss = 0.0
                 avg_D_real = 0.0
                 avg_D_fake = 0.0
+                avg_D_mismatch = 0.0
                 avg_D_out_real = 0.0
                 avg_D_out_fake = 0.0
+                avg_D_out_mismatch = 0.0
 
             # ---------------------------
             # (2) Generator updates
@@ -1205,8 +1272,11 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     train_D_loss = train_D_loss_sum / n_train
     train_D_real = train_D_real_sum / n_train
     train_D_fake = train_D_fake_sum / n_train
+    train_D_mismatch = train_D_mismatch_sum / n_train
     train_D_out_real = train_D_out_real_sum / n_train
     train_D_out_fake = train_D_out_fake_sum / n_train
+    train_D_out_mismatch = train_D_out_mismatch_sum / n_train
+    mismatch_same_scene_frac = same_scene_sum / n_train if use_mismatch else None
 
     train_grad_ratio = (
         grad_ratio_sum / grad_ratio_count if grad_ratio_count > 0 else None
@@ -1288,7 +1358,12 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
     # Fixed probe patches. Runs eval-mode under no_grad and restores the previous modes:
     # a train-mode forward would advance spectral norm's power iteration and change D.
-    probe_metrics = run_probe(netG, netD, probe, device, batch=batch_size)
+    probe_metrics, probe_scores = run_probe(netG, netD, probe, device, batch=batch_size)
+
+    np.savez(
+        os.path.join(probe_scores_dir, f"epoch_{epoch + 1:03d}.npz"),
+        **probe_scores,
+    )
 
 
     # -----------------------------------------------------------------------------
@@ -1326,8 +1401,11 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     history["train_D_loss"].append(train_D_loss)
     history["train_D_real"].append(train_D_real)
     history["train_D_fake"].append(train_D_fake)
+    history["train_D_mismatch"].append(train_D_mismatch if use_mismatch else None)
     history["train_D_out_real"].append(train_D_out_real)
     history["train_D_out_fake"].append(train_D_out_fake)
+    history["train_D_out_mismatch"].append(train_D_out_mismatch if use_mismatch else None)
+    history["train_mismatch_same_scene_frac"].append(mismatch_same_scene_frac)
     history["train_gan_l1_grad_ratio"].append(train_grad_ratio)
     history["train_gan_l1_grad_ratio_param"].append(train_grad_ratio_param)
 
@@ -1375,7 +1453,6 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
 
     if train_grad_ratio is not None:
         summary += f" | GAN/L1 grad: {train_grad_ratio:.4f}"
-
     if train_grad_ratio_param is not None:
         summary += f" | GAN/L1 grad (param): {train_grad_ratio_param:.4f}"
 
@@ -1387,6 +1464,13 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
         f" [{probe_metrics['probe_deg_shuffle_lo']:.4f},"
         f"{probe_metrics['probe_deg_shuffle_hi']:.4f}]"
     )
+
+    if use_mismatch:
+        summary += (
+            f" | D_mismatch: {train_D_mismatch:.6f}"
+            f" | D_out_mismatch: {train_D_out_mismatch:.4f}"
+            f" | same-scene: {mismatch_same_scene_frac:.4f}"
+        )
 
     tqdm.write("\n" + summary)
     logger.info(summary)
