@@ -53,7 +53,13 @@ if gan_repo_path.is_dir():
 
 from mymodels.cp2pwrapper import Pix2PixWrapper
 from models.networks import define_D, init_net, apply_spectral_norm
-from myutils import percentile_limits_np, apply_stretch_np, _sar_rgb_from_norm_percentile
+from myutils import (
+    percentile_limits_np,
+    apply_stretch_np,
+    _sar_rgb_from_norm_percentile,
+    S2_DISPLAY_WINDOWS_DN,
+    S2_DISPLAY_GAMMA,
+)
 
 BAND_NAMES = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B10", "B11", "B12"]
 RGB_IDX = (3, 2, 1)
@@ -98,10 +104,13 @@ def channel_sensitivity(netD, real_A, fake_B, real_B, chan_std):
 # -------------------- (b2) ABLATION --------------------
 
 def channel_ablation(netD, real_A, fake_B, real_B):
-    """Splice one real channel into the fake and measure how much D(fake) recovers.
+    """Splice ONE real band into the fake at a time and measure how much D recovers.
 
-    A gradient says "locally sensitive"; this says "decides on". The channel that
-    recovers the most of the real/fake gap is the one D is reading.
+        recovery_c = (D(fake, band c real) - D(fake)) / (D(real) - D(fake))
+
+    These are C separate experiments, not a decomposition: they have no reason to sum
+    to 1. rec_all splices every band in turn, which must reproduce the real pair and
+    return 1.0 -- it catches a wrong channel axis or concat order in d_input.
     """
     with torch.no_grad():
         base_fake = netD(d_input(real_A, fake_B)).mean().item()
@@ -116,7 +125,33 @@ def channel_ablation(netD, real_A, fake_B, real_B):
             score = netD(d_input(real_A, spliced)).mean().item()
             recovery.append((score - base_fake) / (gap + 1e-12))
 
-    return base_fake, base_real, np.array(recovery)
+        every = fake_B.clone()
+        for c in range(fake_B.shape[-1]):
+            every[..., c] = real_B[..., c]
+        rec_all = (netD(d_input(real_A, every)).mean().item() - base_fake) / (gap + 1e-12)
+
+    return base_fake, base_real, np.array(recovery), rec_all
+
+
+def cumulative_ablation(netD, real_A, fake_B, real_B, order):
+    """Replace the top-k bands of `order` simultaneously, for k = 1..C.
+
+    Answers how many bands have to be real before D changes its verdict. A slow ramp
+    means the cue is joint across bands; a jump at small k means a few bands carry it.
+    """
+    with torch.no_grad():
+        base_fake = netD(d_input(real_A, fake_B)).mean().item()
+        base_real = netD(d_input(real_A, real_B)).mean().item()
+        gap = base_real - base_fake
+
+        spliced = fake_B.clone()
+        out = []
+        for c in order:
+            spliced[..., c] = real_B[..., c]
+            score = netD(d_input(real_A, spliced)).mean().item()
+            out.append((score - base_fake) / (gap + 1e-12))
+
+    return np.array(out)
 
 
 # -------------------- (c) D OUTPUT MAP --------------------
@@ -125,6 +160,10 @@ def save_d_maps(netD, real_A, fake_B, real_B, rgb_u8, out_dir, n):
     with torch.no_grad():
         m_fake = netD(d_input(real_A, fake_B)).cpu().numpy()
         m_real = netD(d_input(real_A, real_B)).cpu().numpy()
+
+    # A flat map and a broken colormap look identical; print the range so they are not.
+    print(f"D map range   fake [{m_fake.min():.4f}, {m_fake.max():.4f}]   "
+          f"real [{m_real.min():.4f}, {m_real.max():.4f}]")
 
     for i in range(min(n, m_fake.shape[0])):
         tiles = []
@@ -147,7 +186,12 @@ def save_d_maps(netD, real_A, fake_B, real_B, rgb_u8, out_dir, n):
 # -------------------- (d) SHARED-STRETCH PANELS --------------------
 
 def save_panels(sar_u8, pred, target, s2_clip, out_dir, n):
-    """Prediction and target through one stretch, taken from the target."""
+    """Prediction and target through the same fixed display window.
+
+    A per-image window taken from the target would be narrow on a low-contrast scene,
+    so a moderate prediction bias renders as pure white or pure black and the size of
+    the error is unreadable. Fixed windows keep panels comparable across scenes.
+    """
     def band(arr, idx):
         lo, hi = s2_clip[idx + 1]
         return (arr[..., idx] + 1.0) * 0.5 * (hi - lo) + lo
@@ -159,9 +203,9 @@ def save_panels(sar_u8, pred, target, s2_clip, out_dir, n):
         for ch, b in enumerate(RGB_IDX):
             t = band(target[i], b)
             p = band(pred[i], b)
-            limits = percentile_limits_np(t)
-            t_rgb[..., ch] = apply_stretch_np(t, limits)
-            p_rgb[..., ch] = apply_stretch_np(p, limits)
+            limits = S2_DISPLAY_WINDOWS_DN.get(b) or percentile_limits_np(t)
+            t_rgb[..., ch] = apply_stretch_np(t, limits, gamma=S2_DISPLAY_GAMMA)
+            p_rgb[..., ch] = apply_stretch_np(p, limits, gamma=S2_DISPLAY_GAMMA)
 
         canvas = np.concatenate([sar_u8[i], p_rgb, t_rgb], axis=1)
         Image.fromarray(canvas).save(os.path.join(out_dir, f"panel_{i:02d}__sar_pred_gt.png"))
@@ -191,6 +235,7 @@ def main():
     sens_raw = np.zeros(c_in + c_out)
     sens_scaled = np.zeros(c_in + c_out)
     recovery = np.zeros(c_out)
+    rec_all_sum = 0.0
     d_fake_all, d_real_all = [], []
     n_batches = 0
 
@@ -213,10 +258,11 @@ def main():
         sens_raw += s["fake"]["raw"]
         sens_scaled += s["fake"]["scaled"]
 
-        d_f, d_r, rec = channel_ablation(netD, real_A, fake_B, real_B)
+        d_f, d_r, rec, rec_all = channel_ablation(netD, real_A, fake_B, real_B)
         d_fake_all.append(d_f)
         d_real_all.append(d_r)
         recovery += rec
+        rec_all_sum += rec_all
         n_batches += 1
 
         if not first:
@@ -225,6 +271,7 @@ def main():
     sens_raw /= n_batches
     sens_scaled /= n_batches
     recovery /= n_batches
+    rec_all_sum /= n_batches
 
     print(f"\nD(fake) {np.mean(d_fake_all):.4f}   D(real) {np.mean(d_real_all):.4f}\n")
 
@@ -238,8 +285,28 @@ def main():
               f"{sens_scaled[i] / total:>6.1%} | {rec}")
 
     order = np.argsort(-recovery)
-    print("\nTop ablation recoveries: " + ", ".join(
+    print("\nTop single-band recoveries: " + ", ".join(
         f"{BAND_NAMES[c]} {recovery[c]:.1%}" for c in order[:5]))
+    print(f"Sum of the {c_out} single-band recoveries: {recovery.sum():.1%}  "
+          f"(not a decomposition; no reason to reach 100%)")
+    print(f"Harness check, every band spliced: {rec_all_sum:.1%}  (must be 100.0%)")
+
+    # Needs the global ordering, so it cannot share the first pass.
+    cum = np.zeros(c_out)
+    for start in range(0, len(idx), BATCH):
+        sel = idx[start:start + BATCH]
+        real_A = torch.from_numpy(np.asarray(X[sel], dtype=np.float32)).to(device)
+        real_B = torch.from_numpy(np.asarray(Y[sel], dtype=np.float32)).to(device)
+        with torch.no_grad():
+            fake_B = netG(real_A)
+        cum += cumulative_ablation(netD, real_A, fake_B, real_B, order)
+    cum /= n_batches
+
+    print("\n(b3) cumulative ablation, bands replaced in descending single-band order")
+    print(f"{'k':>3} {'band added':>11} {'recovery':>9}")
+    print("-" * 26)
+    for k, c in enumerate(order, start=1):
+        print(f"{k:>3} {BAND_NAMES[c]:>11} {cum[k - 1]:>8.1%}")
 
     save_d_maps(netD, first["real_A"], first["fake_B"], first["real_B"],
                 _sar_rgb_from_norm_percentile(first["real_A"]), OUT_DIR, N_PANELS)
@@ -258,6 +325,10 @@ def main():
         "sensitivity_raw": {n: float(v) for n, v in zip(chan_names, sens_raw)},
         "sensitivity_std_scaled": {n: float(v) for n, v in zip(chan_names, sens_scaled)},
         "ablation_recovery": {n: float(v) for n, v in zip(BAND_NAMES[:c_out], recovery)},
+        "ablation_recovery_sum": float(recovery.sum()),
+        "ablation_all_bands_check": float(rec_all_sum),
+        "ablation_order": [BAND_NAMES[c] for c in order],
+        "ablation_cumulative": [float(v) for v in cum],
     }
     with open(os.path.join(OUT_DIR, "discriminator_diagnostics.json"), "w") as f:
         json.dump(summary, f, indent=2)
