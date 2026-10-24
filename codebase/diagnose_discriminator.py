@@ -234,6 +234,30 @@ def bootstrap_ci(stat_fn, n, n_boot=N_BOOT, alpha=CI_ALPHA, seed=SEED):
             np.percentile(draws, 100 * (1 - alpha / 2), axis=0))
 
 
+# -------------------- (b5) BAND STATISTICS --------------------
+
+def band_statistics(fake_B, real_B, sigma=1.0):
+    """Per-band sums for level, contrast and high-frequency energy, pred vs target.
+
+    Separates two failure modes the blur test cannot: a Gaussian removes fine detail
+    but preserves large-scale contrast, so if D punishes the generator far harder than
+    it punishes blur, the generator must also be losing contrast, not just texture.
+    Sums rather than per-batch moments, so the pooled std is exact.
+    """
+    bands = list(range(real_B.shape[-1]))
+    out = {}
+    with torch.no_grad():
+        for tag, B in (("pred", fake_B), ("target", real_B)):
+            hf = B - gaussian_blur_nhwc(B, sigma, bands)
+            out[tag] = {
+                "n": B[..., 0].numel(),
+                "sum": B.sum(dim=(0, 1, 2), dtype=torch.float64).cpu().numpy(),
+                "sumsq": (B.double() ** 2).sum(dim=(0, 1, 2)).cpu().numpy(),
+                "hf_sumsq": (hf.double() ** 2).sum(dim=(0, 1, 2)).cpu().numpy(),
+            }
+    return out
+
+
 # -------------------- (c) D OUTPUT MAP --------------------
 
 def save_d_maps(netD, real_A, fake_B, real_B, rgb_u8, out_dir, n):
@@ -321,6 +345,8 @@ def main():
 
     acc = {"fake": [], "real": [], "splice": [], "every": [], "loo": []}
     blur_acc = {(g, s): [] for g in groups for s in BLUR_SIGMAS}
+    stat_acc = {t: {"n": 0, "sum": np.zeros(c_out), "sumsq": np.zeros(c_out),
+                    "hf_sumsq": np.zeros(c_out)} for t in ("pred", "target")}
     first = {}
 
     for start in range(0, len(idx), BATCH):
@@ -350,6 +376,10 @@ def main():
 
         for key, v in blur_test(netD, real_A, real_B, groups, BLUR_SIGMAS).items():
             blur_acc[key].append(v)
+
+        for tag, s_ in band_statistics(fake_B, real_B).items():
+            for k_ in ("n", "sum", "sumsq", "hf_sumsq"):
+                stat_acc[tag][k_] = stat_acc[tag][k_] + s_[k_]
 
         n_batches += 1
 
@@ -437,6 +467,26 @@ def main():
                 "ci": [float(f_lo[0]), float(f_hi[0])],
             }
 
+    print("\n(b5) per-band statistics, prediction vs target")
+    print(f"{'band':>5} {'std tgt':>9} {'std pred':>9} {'ratio':>7} | "
+          f"{'hf tgt':>8} {'hf pred':>8} {'ratio':>7} | {'mean err':>9}")
+    print("-" * 74)
+    stats = {}
+    for tag in ("pred", "target"):
+        a = stat_acc[tag]
+        mean = a["sum"] / a["n"]
+        stats[tag] = {
+            "mean": mean,
+            "std": np.sqrt(np.maximum(a["sumsq"] / a["n"] - mean ** 2, 0.0)),
+            "hf_std": np.sqrt(a["hf_sumsq"] / a["n"]),
+        }
+    for c, name in enumerate(BAND_NAMES[:c_out]):
+        print(f"{name:>5} {stats['target']['std'][c]:>9.4f} {stats['pred']['std'][c]:>9.4f} "
+              f"{stats['pred']['std'][c] / (stats['target']['std'][c] + 1e-12):>7.2f} | "
+              f"{stats['target']['hf_std'][c]:>8.4f} {stats['pred']['hf_std'][c]:>8.4f} "
+              f"{stats['pred']['hf_std'][c] / (stats['target']['hf_std'][c] + 1e-12):>7.2f} | "
+              f"{stats['pred']['mean'][c] - stats['target']['mean'][c]:>+9.4f}")
+
     save_d_maps(netD, first["real_A"], first["fake_B"], first["real_B"],
                 _sar_rgb_from_norm_percentile(first["real_A"]), OUT_DIR, N_PANELS)
 
@@ -469,6 +519,18 @@ def main():
         "leave_one_out_drop_ci": {
             n_: [float(a), float(b)] for n_, a, b in zip(BAND_NAMES[:c_out], loo_lo, loo_hi)},
         "blur_test": blur_report,
+        "band_stats": {
+            n_: {
+                "std_target": float(stats["target"]["std"][c]),
+                "std_pred": float(stats["pred"]["std"][c]),
+                "std_ratio": float(stats["pred"]["std"][c] / (stats["target"]["std"][c] + 1e-12)),
+                "hf_std_target": float(stats["target"]["hf_std"][c]),
+                "hf_std_pred": float(stats["pred"]["hf_std"][c]),
+                "hf_std_ratio": float(stats["pred"]["hf_std"][c] / (stats["target"]["hf_std"][c] + 1e-12)),
+                "mean_error": float(stats["pred"]["mean"][c] - stats["target"]["mean"][c]),
+            }
+            for c, n_ in enumerate(BAND_NAMES[:c_out])
+        },
         "ablation_order": [BAND_NAMES[c] for c in order],
         "ablation_cumulative": [float(v) for v in cum],
         "ablation_cumulative_ci": [
