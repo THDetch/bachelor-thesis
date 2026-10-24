@@ -4,9 +4,16 @@
 # Run it on a trained checkpoint; it never updates weights.
 #
 #   (b1) per-channel input sensitivity   -> which of the 15 input channels D reacts to
-#   (b2) per-channel ablation            -> which channel D actually decides on
+#   (b2) splice-in  (fake + real band)   -> single, cumulative, and a harness check
+#   (b3) leave-one-out (real + fake band)-> does ONE fake band condemn a real patch?
+#   (b4) blur test  (blurred real)       -> the only test with no splicing artefacts
 #   (c)  D output map overlaid on RGB    -> where in the image D is confident
 #   (d)  pred vs GT under ONE stretch    -> what the images really look like
+#
+# CAVEAT for (b2) and (b3): a patch mixing real and generated bands is out of
+# distribution for D -- it never saw one during training. So splice results cannot on
+# their own separate "D reads a joint cross-band cue" from "D rejects inconsistent
+# mixtures". Only (b4) keeps the input on the real-image manifold.
 #
 # Usage: adjust CONFIG, then `python diagnose_discriminator.py`
 
@@ -35,13 +42,17 @@ NORM_G = "batch"
 NORM_D = "instance"
 USE_SPECTRAL_NORM = True
 
-N_SAMPLES = 64                      # patches for the sensitivity/ablation statistics
+N_SAMPLES = 512                     # patches for the sensitivity/ablation statistics
 N_PANELS = 8                        # patches to render as images
-BATCH = 8
+BATCH = 16
 GPU_ID = 0
 SEED = 42
 
-OUT_DIR = f"{MODEL_DIR}/diagnostics"
+BLUR_SIGMAS = (0.5, 1.0, 2.0)       # pixels, applied to the REAL target
+N_BOOT = 2000                       # bootstrap resamples over patches
+CI_ALPHA = 0.05
+
+OUT_DIR = f"{MODEL_DIR}/diagnostics_CIs"
 
 
 # -------------------- SETUP --------------------
@@ -63,6 +74,14 @@ from myutils import (
 
 BAND_NAMES = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B10", "B11", "B12"]
 RGB_IDX = (3, 2, 1)
+
+BAND_GROUPS = {
+    "ALL": list(range(13)),
+    "VIS": [1, 2, 3],        # B2 B3 B4
+    "RE": [4, 5, 6],         # B5 B6 B7
+    "NIR": [7, 8],           # B8 B8A
+    "SWIR": [11, 12],        # B11 B12
+}
 
 
 def load_models(c_in, c_out, img_size, device):
@@ -101,57 +120,118 @@ def channel_sensitivity(netD, real_A, fake_B, real_B, chan_std):
     return out
 
 
-# -------------------- (b2) ABLATION --------------------
-
-def channel_ablation(netD, real_A, fake_B, real_B):
-    """Splice ONE real band into the fake at a time and measure how much D recovers.
-
-        recovery_c = (D(fake, band c real) - D(fake)) / (D(real) - D(fake))
-
-    These are C separate experiments, not a decomposition: they have no reason to sum
-    to 1. rec_all splices every band in turn, which must reproduce the real pair and
-    return 1.0 -- it catches a wrong channel axis or concat order in d_input.
-    """
+def d_scores(netD, real_A, B):
+    """Mean D output per patch, shape (N,). Per-patch so the bootstrap can resample."""
     with torch.no_grad():
-        base_fake = netD(d_input(real_A, fake_B)).mean().item()
-        base_real = netD(d_input(real_A, real_B)).mean().item()
-
-        gap = base_real - base_fake
-        recovery = []
-
-        for c in range(fake_B.shape[-1]):
-            spliced = fake_B.clone()
-            spliced[..., c] = real_B[..., c]
-            score = netD(d_input(real_A, spliced)).mean().item()
-            recovery.append((score - base_fake) / (gap + 1e-12))
-
-        every = fake_B.clone()
-        for c in range(fake_B.shape[-1]):
-            every[..., c] = real_B[..., c]
-        rec_all = (netD(d_input(real_A, every)).mean().item() - base_fake) / (gap + 1e-12)
-
-    return base_fake, base_real, np.array(recovery), rec_all
+        return netD(d_input(real_A, B)).mean(dim=(1, 2, 3)).cpu().numpy()
 
 
-def cumulative_ablation(netD, real_A, fake_B, real_B, order):
-    """Replace the top-k bands of `order` simultaneously, for k = 1..C.
+# -------------------- (b2) SPLICE-IN --------------------
 
-    Answers how many bands have to be real before D changes its verdict. A slow ramp
-    means the cue is joint across bands; a jump at small k means a few bands carry it.
+def splice_in(netD, real_A, fake_B, real_B):
+    """Fake patch with ONE real band spliced in, for each band, plus the all-band check.
+
+    Returns raw per-patch D scores; recovery ratios are formed later so the bootstrap
+    can rebuild them from resampled patches. These are C separate experiments, not a
+    decomposition -- they have no reason to sum to the all-band value.
     """
-    with torch.no_grad():
-        base_fake = netD(d_input(real_A, fake_B)).mean().item()
-        base_real = netD(d_input(real_A, real_B)).mean().item()
-        gap = base_real - base_fake
-
+    cols = []
+    for c in range(fake_B.shape[-1]):
         spliced = fake_B.clone()
-        out = []
-        for c in order:
-            spliced[..., c] = real_B[..., c]
-            score = netD(d_input(real_A, spliced)).mean().item()
-            out.append((score - base_fake) / (gap + 1e-12))
+        spliced[..., c] = real_B[..., c]
+        cols.append(d_scores(netD, real_A, spliced))
 
-    return np.array(out)
+    # Splicing every band must reproduce real_B; catches a wrong axis or concat order.
+    every = fake_B.clone()
+    for c in range(fake_B.shape[-1]):
+        every[..., c] = real_B[..., c]
+
+    return np.stack(cols, axis=1), d_scores(netD, real_A, every)
+
+
+def splice_in_cumulative(netD, real_A, fake_B, real_B, order):
+    """Fake patch with the top-k bands of `order` made real simultaneously, k = 1..C."""
+    spliced = fake_B.clone()
+    cols = []
+    for c in order:
+        spliced[..., c] = real_B[..., c]
+        cols.append(d_scores(netD, real_A, spliced))
+    return np.stack(cols, axis=1)
+
+
+# -------------------- (b3) LEAVE-ONE-OUT --------------------
+
+def leave_one_out(netD, real_A, fake_B, real_B):
+    """Real patch with ONE band replaced by the generated band.
+
+    The reverse direction of (b2). If a single fake band is enough to condemn an
+    otherwise real patch, D holds a per-band test rather than a joint one.
+    """
+    cols = []
+    for c in range(real_B.shape[-1]):
+        damaged = real_B.clone()
+        damaged[..., c] = fake_B[..., c]
+        cols.append(d_scores(netD, real_A, damaged))
+    return np.stack(cols, axis=1)
+
+
+# -------------------- (b4) BLUR TEST --------------------
+
+def _gaussian_kernel1d(sigma, device):
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    x = torch.arange(-radius, radius + 1, dtype=torch.float32, device=device)
+    k = torch.exp(-0.5 * (x / sigma) ** 2)
+    return k / k.sum()
+
+
+def gaussian_blur_nhwc(x, sigma, bands):
+    """Separable Gaussian blur over `bands` only; the remaining bands pass through."""
+    k = _gaussian_kernel1d(sigma, x.device)
+    r = (k.numel() - 1) // 2
+
+    sub = x[..., bands].permute(0, 3, 1, 2)
+    c = sub.shape[1]
+    sub = torch.nn.functional.pad(sub, (r, r, r, r), mode="reflect")
+    sub = torch.nn.functional.conv2d(sub, k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
+    sub = torch.nn.functional.conv2d(sub, k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
+
+    out = x.clone()
+    out[..., bands] = sub.permute(0, 2, 3, 1)
+    return out
+
+
+def blur_test(netD, real_A, real_B, groups, sigmas):
+    """D's score on REAL targets softened by a Gaussian, per sigma and band group.
+
+    The decisive test for "D detects missing texture": a blurred real image stays on
+    the real-image manifold, so a drop cannot be blamed on splicing artefacts.
+    """
+    out = {}
+    with torch.no_grad():
+        for name, bands in groups.items():
+            for s in sigmas:
+                out[(name, s)] = d_scores(netD, real_A, gaussian_blur_nhwc(real_B, s, bands))
+    return out
+
+
+# -------------------- UNCERTAINTY --------------------
+
+def recovery_ratio(scores, d_fake, d_real, sel):
+    """(mean(scores) - mean(D_fake)) / (mean(D_real) - mean(D_fake)) over patches `sel`.
+
+    Ratios are rebuilt from resampled means rather than averaged per patch, so a patch
+    whose own real/fake gap is near zero cannot blow up the estimate.
+    """
+    lo = d_fake[sel].mean()
+    hi = d_real[sel].mean()
+    return (scores[sel].mean(axis=0) - lo) / (hi - lo)
+
+
+def bootstrap_ci(stat_fn, n, n_boot=N_BOOT, alpha=CI_ALPHA, seed=SEED):
+    rng = np.random.default_rng(seed)
+    draws = np.stack([stat_fn(rng.integers(0, n, n)) for _ in range(n_boot)])
+    return (np.percentile(draws, 100 * alpha / 2, axis=0),
+            np.percentile(draws, 100 * (1 - alpha / 2), axis=0))
 
 
 # -------------------- (c) D OUTPUT MAP --------------------
@@ -232,13 +312,15 @@ def main():
     print(f"{MODEL_DIR}/{NETD_FILE} on {SPLIT}: {len(idx)} patches, device {device}")
     netG, netD = load_models(c_in, c_out, img_size, device)
 
+    groups = {k: [b for b in v if b < c_out] for k, v in BAND_GROUPS.items()}
+    groups = {k: v for k, v in groups.items() if v}
+
     sens_raw = np.zeros(c_in + c_out)
     sens_scaled = np.zeros(c_in + c_out)
-    recovery = np.zeros(c_out)
-    rec_all_sum = 0.0
-    d_fake_all, d_real_all = [], []
     n_batches = 0
 
+    acc = {"fake": [], "real": [], "splice": [], "every": [], "loo": []}
+    blur_acc = {(g, s): [] for g in groups for s in BLUR_SIGMAS}
     first = {}
 
     for start in range(0, len(idx), BATCH):
@@ -258,11 +340,17 @@ def main():
         sens_raw += s["fake"]["raw"]
         sens_scaled += s["fake"]["scaled"]
 
-        d_f, d_r, rec, rec_all = channel_ablation(netD, real_A, fake_B, real_B)
-        d_fake_all.append(d_f)
-        d_real_all.append(d_r)
-        recovery += rec
-        rec_all_sum += rec_all
+        acc["fake"].append(d_scores(netD, real_A, fake_B))
+        acc["real"].append(d_scores(netD, real_A, real_B))
+
+        sp, ev = splice_in(netD, real_A, fake_B, real_B)
+        acc["splice"].append(sp)
+        acc["every"].append(ev)
+        acc["loo"].append(leave_one_out(netD, real_A, fake_B, real_B))
+
+        for key, v in blur_test(netD, real_A, real_B, groups, BLUR_SIGMAS).items():
+            blur_acc[key].append(v)
+
         n_batches += 1
 
         if not first:
@@ -270,43 +358,84 @@ def main():
 
     sens_raw /= n_batches
     sens_scaled /= n_batches
-    recovery /= n_batches
-    rec_all_sum /= n_batches
 
-    print(f"\nD(fake) {np.mean(d_fake_all):.4f}   D(real) {np.mean(d_real_all):.4f}\n")
+    d_fake = np.concatenate(acc["fake"])
+    d_real = np.concatenate(acc["real"])
+    d_splice = np.concatenate(acc["splice"])
+    d_every = np.concatenate(acc["every"])
+    d_loo = np.concatenate(acc["loo"])
+    blur = {k: np.concatenate(v) for k, v in blur_acc.items()}
+    n = len(d_fake)
+    full = np.arange(n)
 
-    print("(b) input sensitivity and ablation recovery")
-    print(f"{'chan':>5} {'|dD/dx|':>11} {'x std':>11} {'share':>7} | {'recovery':>9}")
-    print("-" * 52)
+    recovery = recovery_ratio(d_splice, d_fake, d_real, full)
+    rec_lo, rec_hi = bootstrap_ci(lambda s: recovery_ratio(d_splice, d_fake, d_real, s), n)
+
+    rec_all = recovery_ratio(d_every[:, None], d_fake, d_real, full)[0]
+
+    # 1.0 = the single fake band costs the whole real/fake gap.
+    loo_drop = 1.0 - recovery_ratio(d_loo, d_fake, d_real, full)
+    loo_lo, loo_hi = bootstrap_ci(
+        lambda s: 1.0 - recovery_ratio(d_loo, d_fake, d_real, s), n)
+
+    print(f"\nD(fake) {d_fake.mean():.4f}   D(real) {d_real.mean():.4f}   n = {n}")
+    print(f"Harness check, every band spliced: {rec_all:.1%}  (must be 100.0%)\n")
+
+    print("(b1/b2/b3) sensitivity, splice-in recovery, leave-one-out drop  [95% CI]")
+    print(f"{'chan':>5} {'x std':>10} {'share':>7} | {'splice-in':>20} | {'leave-one-out':>20}")
+    print("-" * 70)
     total = sens_scaled.sum() + 1e-12
     for i, name in enumerate(chan_names):
-        rec = f"{recovery[i - c_in]:>8.1%}" if i >= c_in else f"{'-':>8}"
-        print(f"{name:>5} {sens_raw[i]:>11.3e} {sens_scaled[i]:>11.3e} "
-              f"{sens_scaled[i] / total:>6.1%} | {rec}")
+        if i < c_in:
+            sp = loo_s = f"{'-':>20}"
+        else:
+            c = i - c_in
+            sp = f"{recovery[c]:>7.1%} [{rec_lo[c]:>5.1%},{rec_hi[c]:>5.1%}]"
+            loo_s = f"{loo_drop[c]:>7.1%} [{loo_lo[c]:>5.1%},{loo_hi[c]:>5.1%}]"
+        print(f"{name:>5} {sens_scaled[i]:>10.3e} {sens_scaled[i] / total:>6.1%} | {sp} | {loo_s}")
 
     order = np.argsort(-recovery)
-    print("\nTop single-band recoveries: " + ", ".join(
-        f"{BAND_NAMES[c]} {recovery[c]:.1%}" for c in order[:5]))
-    print(f"Sum of the {c_out} single-band recoveries: {recovery.sum():.1%}  "
-          f"(not a decomposition; no reason to reach 100%)")
-    print(f"Harness check, every band spliced: {rec_all_sum:.1%}  (must be 100.0%)")
+    print(f"\nSum of the {c_out} single-band recoveries: {recovery.sum():.1%}  "
+          f"(C separate experiments, not a decomposition)")
 
     # Needs the global ordering, so it cannot share the first pass.
-    cum = np.zeros(c_out)
+    cum_acc = []
     for start in range(0, len(idx), BATCH):
         sel = idx[start:start + BATCH]
         real_A = torch.from_numpy(np.asarray(X[sel], dtype=np.float32)).to(device)
         real_B = torch.from_numpy(np.asarray(Y[sel], dtype=np.float32)).to(device)
         with torch.no_grad():
             fake_B = netG(real_A)
-        cum += cumulative_ablation(netD, real_A, fake_B, real_B, order)
-    cum /= n_batches
+        cum_acc.append(splice_in_cumulative(netD, real_A, fake_B, real_B, order))
+    d_cum = np.concatenate(cum_acc)
 
-    print("\n(b3) cumulative ablation, bands replaced in descending single-band order")
-    print(f"{'k':>3} {'band added':>11} {'recovery':>9}")
-    print("-" * 26)
+    cum = recovery_ratio(d_cum, d_fake, d_real, full)
+    cum_lo, cum_hi = bootstrap_ci(lambda s: recovery_ratio(d_cum, d_fake, d_real, s), n)
+
+    print("\n(b2c) cumulative splice-in, descending single-band order")
+    print(f"{'k':>3} {'band added':>11} {'recovery':>9} {'95% CI':>18}")
+    print("-" * 45)
     for k, c in enumerate(order, start=1):
-        print(f"{k:>3} {BAND_NAMES[c]:>11} {cum[k - 1]:>8.1%}")
+        print(f"{k:>3} {BAND_NAMES[c]:>11} {cum[k - 1]:>8.1%} "
+              f"[{cum_lo[k - 1]:>6.1%},{cum_hi[k - 1]:>6.1%}]")
+
+    print("\n(b4) blur test on REAL targets: D output, and how far it falls toward fake")
+    print(f"{'group':>6} {'sigma':>6} {'D(blurred real)':>16} {'toward fake':>13} {'95% CI':>18}")
+    print("-" * 64)
+    blur_report = {}
+    for g in groups:
+        for s in BLUR_SIGMAS:
+            b = blur[(g, s)]
+            frac_fn = lambda sel, b=b: 1.0 - recovery_ratio(b[:, None], d_fake, d_real, sel)
+            frac = frac_fn(full)[0]
+            f_lo, f_hi = bootstrap_ci(lambda sel, f=frac_fn: f(sel), n)
+            print(f"{g:>6} {s:>6.1f} {b.mean():>16.4f} {frac:>12.1%} "
+                  f"[{f_lo[0]:>6.1%},{f_hi[0]:>6.1%}]")
+            blur_report[f"{g}_sigma{s}"] = {
+                "d_out": float(b.mean()),
+                "fraction_toward_fake": float(frac),
+                "ci": [float(f_lo[0]), float(f_hi[0])],
+            }
 
     save_d_maps(netD, first["real_A"], first["fake_B"], first["real_B"],
                 _sar_rgb_from_norm_percentile(first["real_A"]), OUT_DIR, N_PANELS)
@@ -319,16 +448,31 @@ def main():
         "model_dir": MODEL_DIR,
         "netD_file": NETD_FILE,
         "split": SPLIT,
-        "n_patches": int(len(idx)),
-        "d_out_fake": float(np.mean(d_fake_all)),
-        "d_out_real": float(np.mean(d_real_all)),
-        "sensitivity_raw": {n: float(v) for n, v in zip(chan_names, sens_raw)},
-        "sensitivity_std_scaled": {n: float(v) for n, v in zip(chan_names, sens_scaled)},
-        "ablation_recovery": {n: float(v) for n, v in zip(BAND_NAMES[:c_out], recovery)},
+        "n_patches": int(n),
+        "n_boot": N_BOOT,
+        "caveat": (
+            "splice-in and leave-one-out feed D patches that mix real and generated "
+            "bands, which are out of distribution for D; on their own they cannot "
+            "separate a joint cross-band cue from rejection of inconsistent mixtures. "
+            "The blur test does not splice and is the one to trust for 'missing texture'."
+        ),
+        "d_out_fake": float(d_fake.mean()),
+        "d_out_real": float(d_real.mean()),
+        "sensitivity_raw": {n_: float(v) for n_, v in zip(chan_names, sens_raw)},
+        "sensitivity_std_scaled": {n_: float(v) for n_, v in zip(chan_names, sens_scaled)},
+        "ablation_recovery": {n_: float(v) for n_, v in zip(BAND_NAMES[:c_out], recovery)},
+        "ablation_recovery_ci": {
+            n_: [float(a), float(b)] for n_, a, b in zip(BAND_NAMES[:c_out], rec_lo, rec_hi)},
         "ablation_recovery_sum": float(recovery.sum()),
-        "ablation_all_bands_check": float(rec_all_sum),
+        "ablation_all_bands_check": float(rec_all),
+        "leave_one_out_drop": {n_: float(v) for n_, v in zip(BAND_NAMES[:c_out], loo_drop)},
+        "leave_one_out_drop_ci": {
+            n_: [float(a), float(b)] for n_, a, b in zip(BAND_NAMES[:c_out], loo_lo, loo_hi)},
+        "blur_test": blur_report,
         "ablation_order": [BAND_NAMES[c] for c in order],
         "ablation_cumulative": [float(v) for v in cum],
+        "ablation_cumulative_ci": [
+            [float(a), float(b)] for a, b in zip(cum_lo, cum_hi)],
     }
     with open(os.path.join(OUT_DIR, "discriminator_diagnostics.json"), "w") as f:
         json.dump(summary, f, indent=2)
