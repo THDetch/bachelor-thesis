@@ -80,7 +80,7 @@ input_channel_select = None  # 0, 1, or None for all S1 channels
 # -----------------------------------------------------------------------------
 # A_base: current D (InstanceNorm + spectral norm), no extra term -> reference arm.
 # Later arms change exactly one thing each; see success_criteria.md.
-arm = "A0"
+arm = "A1"
 
 # norm="none" would also switch off conv bias, because NLayerDiscriminator derives
 # use_bias from the norm layer's type. Build with InstanceNorm and strip it instead.
@@ -532,6 +532,7 @@ history = {
     "probe_D_out_real": [],
     "probe_D_out_fake": [],
     "probe_hf_ratio": [],
+    "probe_hf_corr": [],
     "probe_std_ratio": [],
     "probe_deg_shuffle": [],
     "probe_deg_shuffle_lo": [],
@@ -819,10 +820,12 @@ def save_detailed_training_plots():
         x,
         [
             history["probe_hf_ratio"],
+            history["probe_hf_corr"],
             history["probe_std_ratio"],
         ],
         [
             "land-band HF std ratio",
+            "land-band HF correlation",
             "within-patch std ratio",
         ],
         "Generator Detail vs Target (128 fixed val patches)",
@@ -1460,6 +1463,7 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     summary += (
         f" | probe D(f): {probe_metrics['probe_D_out_fake']:.4f}"
         f" | HF: {probe_metrics['probe_hf_ratio']:.4f}"
+        f" | HFcorr: {probe_metrics['probe_hf_corr']:.4f}"
         f" | std: {probe_metrics['probe_std_ratio']:.4f}"
         f" | deg_shuffle: {probe_metrics['probe_deg_shuffle']:.4f}"
         f" [{probe_metrics['probe_deg_shuffle_lo']:.4f},"

@@ -127,12 +127,15 @@ def evaluate(armname, rows, base, is_reference=False):
     if files:
         deg, lo, _ = pooled_deg_shuffle(files)
         note = f"deg_shuffle {round(deg, 4)}, CI low {round(lo, 4)} (pooled {len(files)} ep)"
+        out["_c_estimator"] = "pooled"
     else:
         # Runs from before per-patch scores were persisted fall back to the epoch means.
         deg = window_mean(rows, "probe_deg_shuffle", LATE)
         lo = window_mean(rows, "probe_deg_shuffle_lo", LATE)
         note = (f"deg_shuffle {deg if deg is None else round(deg, 4)}, "
-                f"CI low {lo if lo is None else round(lo, 4)} (per-epoch mean)")
+                f"CI low {lo if lo is None else round(lo, 4)} "
+                f"(per-epoch mean, NO per-patch scores)")
+        out["_c_estimator"] = "per-epoch"
     out["C"] = (deg is not None and lo is not None and deg >= C_DEG and lo > 0, note)
 
     return out
@@ -142,6 +145,8 @@ def main():
     base = load(f"trained_arm_A_base/pix2pix/history.csv")
     if base is None:
         print(f"[note] arm_A_base not found; T and F fall back to absolute thresholds\n")
+
+    estimators = {}
 
     for armname in ARMS:
         path = f"trained_arm_{armname}/pix2pix/history.csv"
@@ -153,8 +158,16 @@ def main():
         n = len(rows)
         tag = "" if n >= WINDOW[1] else f"  (ABORTED after epoch {n})"
         print(f"\n{armname}  [{n} epochs]{tag}")
-        for cid, (ok, detail) in evaluate(armname, rows, base, armname == "A_base").items():
+        res = evaluate(armname, rows, base, armname == "A_base")
+        estimators[armname] = res.pop("_c_estimator", None)
+        for cid, (ok, detail) in res.items():
             print(f"   {cid:>2}  {verdict(ok):>4}   {detail}")
+
+    used = {v for v in estimators.values() if v}
+    if len(used) > 1:
+        odd = [k for k, v in estimators.items() if v == "per-epoch"]
+        print(f"\n[WARN] C is not estimated the same way in every arm: {', '.join(odd)} "
+              f"lack per-patch scores. Rerun them, or read C as indicative there.")
 
     if base is not None:
         ref = load(REFERENCE_RUN)

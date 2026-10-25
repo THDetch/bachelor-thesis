@@ -128,7 +128,7 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
 
     try:
         d_real, d_fake, d_shuf = [], [], []
-        hf_num, hf_den, sd_num, sd_den = [], [], [], []
+        hf_num, hf_den, sd_num, sd_den, hf_corr = [], [], [], [], []
 
         for s in range(0, len(probe["indices"]), batch):
             sl = slice(s, s + batch)
@@ -153,12 +153,19 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
             sd_num.append(fake_B.std((1, 2)).cpu().numpy())
             sd_den.append(real_B.std((1, 2)).cpu().numpy())
 
+            # Ratio alone cannot tell real detail from hallucinated detail: noise sprayed
+            # over smooth water scores as well as texture that matches the scene.
+            cov = (f_hf * r_hf).mean((1, 2)) - f_hf.mean((1, 2)) * r_hf.mean((1, 2))
+            hf_corr.append(
+                (cov / (f_hf.std((1, 2)) * r_hf.std((1, 2)) + 1e-12)).cpu().numpy())
+
         d_real = np.concatenate(d_real)
         d_fake = np.concatenate(d_fake)
         d_shuf = np.concatenate(d_shuf)
 
         hf = np.concatenate(hf_num) / (np.concatenate(hf_den) + 1e-12)
         sd = np.concatenate(sd_num) / (np.concatenate(sd_den) + 1e-12)
+        corr = np.concatenate(hf_corr)
         land = [b for b in LAND_BANDS if b < hf.shape[1]]
 
         deg = 1.0 - (d_shuf.mean() - d_fake.mean()) / (d_real.mean() - d_fake.mean())
@@ -168,6 +175,7 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
             "probe_D_out_real": float(d_real.mean()),
             "probe_D_out_fake": float(d_fake.mean()),
             "probe_hf_ratio": float(hf[:, land].mean()),
+            "probe_hf_corr": float(corr[:, land].mean()),
             "probe_std_ratio": float(sd[:, land].mean()),
             "probe_deg_shuffle": float(deg),
             "probe_deg_shuffle_lo": ci_lo,

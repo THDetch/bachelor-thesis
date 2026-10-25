@@ -14,8 +14,13 @@ checkpoint every 5 epochs, new run directory per arm, auto-resume off.
 | A_base | InstanceNorm + SN | none | reference |
 | A0 | InstanceNorm + SN | mismatch | A_base -> conditioning |
 | A1 | norm stripped, bias kept, SN | none | A_base -> normalization |
-| A2 | norm stripped, SN | instance noise | A1 -> noise |
-| A3 | norm stripped, SN | mismatch | A1 -> conditioning |
+| A2 | D as A1 | instance noise | A1 -> noise |
+| A3 | D as A1 | mismatch | A1 -> conditioning; A0 -> normalization |
+
+Every arm's D has bias on all 5 convs and spectral norm on all 5, and all five arms have
+an identical parameter count of 2,777,025 - `InstanceNorm2d` is built with `affine=False`,
+so replacing it with `Identity` removes nothing learnable. The startup assertions check
+this, so each contrast above differs by exactly the one thing named.
 
 ## Criteria
 
