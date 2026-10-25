@@ -1,4 +1,4 @@
-# The main training script.
+﻿# The main training script.
 # pix2pix -> model trained
 # lpips and ssim -> optional losses incorporated during training
 # generate -> monitor samples are saved periodically
@@ -80,7 +80,7 @@ input_channel_select = None  # 0, 1, or None for all S1 channels
 # -----------------------------------------------------------------------------
 # A_base: current D (InstanceNorm + spectral norm), no extra term -> reference arm.
 # Later arms change exactly one thing each; see success_criteria.md.
-arm = "A1"
+arm = "A3"
 
 # norm="none" would also switch off conv bias, because NLayerDiscriminator derives
 # use_bias from the norm layer's type. Build with InstanceNorm and strip it instead.
@@ -1498,7 +1498,7 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
             )
 
             tqdm.write(
-                f"Saved monitor samples for epoch {epoch + 1} → "
+                f"Saved monitor samples for epoch {epoch + 1} â†’ "
                 f"{os.path.join(samples_dir, f'epoch_{epoch + 1:03d}')}"
             )
 
