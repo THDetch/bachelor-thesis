@@ -4,16 +4,18 @@
 
 import csv
 import glob
+import json
 import os
 
 import numpy as np
 
-ARMS = ["A_base", "A0", "A1", "A2", "A3"]
+ARMS = ["A_base", "A0", "A1", "A2", "A3", "A3-g3", "A3-g10", "L1-only"]
 REFERENCE_RUN = "trained_baseline_scenesplit_sn/pix2pix/history.csv"
 
 WINDOW = (11, 20)        # S1, S2
 LATE = (18, 20)          # S3 numerator, T, F, C
 EARLY = (9, 11)          # S3 denominator
+FIRST = (1, 3)           # baseline for the D(real) growth trigger
 S1_D_OUT_FAKE = 0.10
 S1_D_LOSS = 0.02
 S2_G_GAN = 0.90
@@ -56,6 +58,20 @@ def score_files(armname, window=LATE):
             if window[0] <= int(os.path.basename(p)[6:9]) <= window[1]]
 
 
+def hf_corr(armname, rows):
+    """Windowed mean, or the back-filled single epoch for runs that predate the metric."""
+    v = window_mean(rows, "probe_hf_corr", LATE)
+    if v is not None:
+        return v, ""
+
+    path = f"trained_arm_{armname}/pix2pix/probe_backfill.json"
+    if os.path.isfile(path):
+        with open(path) as f:
+            b = json.load(f)
+        return b["probe_hf_corr"], f" (back-filled, epoch {b['reference_epoch']})"
+    return None, " (not measured)"
+
+
 def pooled_deg_shuffle(files, n_boot=1000, seed=12345, alpha=0.05):
     """deg_shuffle from per-patch scores pooled across epochs, then bootstrapped.
 
@@ -91,10 +107,11 @@ def evaluate(armname, rows, base, is_reference=False):
 
     d_fake = window_mean(rows, "train_D_out_fake")
     d_loss = window_mean(rows, "train_D_loss")
+    sat = "  <- saturation, retry lr_D 2.5e-5" if (d_fake is not None and d_fake < 0.10) else ""
     out["S1"] = (d_fake is not None and d_loss is not None
                  and d_fake >= S1_D_OUT_FAKE and d_loss >= S1_D_LOSS,
                  f"D_out_fake {d_fake if d_fake is None else round(d_fake, 4)}, "
-                 f"D_loss {d_loss if d_loss is None else round(d_loss, 4)}")
+                 f"D_loss {d_loss if d_loss is None else round(d_loss, 4)}{sat}")
 
     g_gan = window_mean(rows, "train_G_GAN")
     out["S2"] = (g_gan is not None and g_gan <= S2_G_GAN,
@@ -137,6 +154,22 @@ def evaluate(armname, rows, base, is_reference=False):
                 f"(per-epoch mean, NO per-patch scores)")
         out["_c_estimator"] = "per-epoch"
     out["C"] = (deg is not None and lo is not None and deg >= C_DEG and lo > 0, note)
+
+    corr, corr_note = hf_corr(armname, rows)
+    grad = window_mean(rows, "train_gan_l1_grad_ratio_param", LATE)
+
+    # U was withdrawn on 2026-11-08: its hf_corr leg does not discriminate. Both numbers
+    # are still reported because the lambda_GAN grid manipulates the gradient one.
+    out["~"] = (None, f"hf_corr {corr if corr is None else round(corr, 4)}{corr_note}, "
+                      f"grad {grad if grad is None else round(grad, 4)}  [reported]")
+
+    # Fallback triggers from success_criteria.md.
+    early_r = window_mean(rows, "train_D_out_real", FIRST)
+    late_r = window_mean(rows, "train_D_out_real", LATE)
+    if early_r and late_r:
+        growth = 100 * (late_r - early_r) / early_r
+        flag = "  <- too weak, retry lr_D 1e-4" if growth < 10 else ""
+        out[" "] = (None, f"D(real) growth {growth:+.1f}%{flag}  [reported]")
 
     return out
 

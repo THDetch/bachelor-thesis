@@ -79,17 +79,27 @@ input_channel_select = None  # 0, 1, or None for all S1 channels
 # Experiment arm
 # -----------------------------------------------------------------------------
 # A_base: current D (InstanceNorm + spectral norm), no extra term -> reference arm.
-# Later arms change exactly one thing each; see success_criteria.md.
-arm = "A3"
+# Each arm changes exactly one thing from its comparison arm; see success_criteria.md.
+#
+# strip_norm: norm="none" would also switch off conv bias, because NLayerDiscriminator
+# derives use_bias from the norm layer's type. Build with InstanceNorm and strip it.
+# mismatch:   (wrong SAR, real optical) labelled fake, additive at weight 0.5.
+# lambda_GAN: 0 means D still trains and is still probed, but never reaches G.
+ARM_CONFIG = {
+    "A_base":  dict(strip_norm=False, mismatch=False, lambda_GAN=1.0),
+    "A0":      dict(strip_norm=False, mismatch=True,  lambda_GAN=1.0),
+    "A1":      dict(strip_norm=True,  mismatch=False, lambda_GAN=1.0),
+    "A2":      dict(strip_norm=True,  mismatch=False, lambda_GAN=1.0),
+    "A3":      dict(strip_norm=True,  mismatch=True,  lambda_GAN=1.0),
+    "A3-g3":   dict(strip_norm=True,  mismatch=True,  lambda_GAN=3.0),
+    "A3-g10":  dict(strip_norm=True,  mismatch=True,  lambda_GAN=10.0),
+    "L1-only": dict(strip_norm=True,  mismatch=True,  lambda_GAN=0.0),
+}
 
-# norm="none" would also switch off conv bias, because NLayerDiscriminator derives
-# use_bias from the norm layer's type. Build with InstanceNorm and strip it instead.
-strip_norm_from_D = arm in ("A1", "A2", "A3")
+arm = "A3-g3"
 
-# Mismatched pair (wrong SAR, real optical) labelled fake, so the condition becomes the
-# only thing separating it from the real pair. Additive: the original terms keep their
-# weights and the logged D loss stays the two-term form.
-use_mismatch = arm in ("A0", "A3")
+strip_norm_from_D = ARM_CONFIG[arm]["strip_norm"]
+use_mismatch = ARM_CONFIG[arm]["mismatch"]
 
 epochs = 20
 batch_size = 16
@@ -169,7 +179,7 @@ use_lpips = False
 # lambda_ssim = 10.0
 # lambda_lpips = 10.0
 
-lambda_GAN = 1.0
+lambda_GAN = ARM_CONFIG[arm]["lambda_GAN"]
 lambda_L1 = 100.0
 lambda_ssim = 10.0
 lambda_lpips = 10.0
@@ -383,7 +393,7 @@ def check_arm_networks():
         assert m.bias is not None, f"conv {i} has no bias"
 
     norms = [m for m in netD.modules() if isinstance(m, NORM_TYPES)]
-    expect_norm = arm in ("A_base", "A0")
+    expect_norm = not strip_norm_from_D
     assert bool(norms) == expect_norm, (
         f"arm {arm} expects norm layers in D: {expect_norm}, found {len(norms)}")
 
@@ -402,6 +412,8 @@ def check_arm_networks():
 
     print(f"[ARM] D convs {len(convs)}, norm modules {len(norms)}, "
           f"params {param_count_D:,}; G BatchNorm layers {len(g_norms)}  OK")
+    print(f"[ARM] lambda_GAN {lambda_GAN}, lambda_L1 {lambda_L1}, "
+          f"mismatch {use_mismatch}, strip_norm {strip_norm_from_D}")
 
 
 check_arm_networks()
