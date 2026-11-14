@@ -96,7 +96,7 @@ ARM_CONFIG = {
     "L1-only": dict(strip_norm=True,  mismatch=True,  lambda_GAN=0.0),
 }
 
-arm = "A3-g3"
+arm = "A3-g10"
 
 strip_norm_from_D = ARM_CONFIG[arm]["strip_norm"]
 use_mismatch = ARM_CONFIG[arm]["mismatch"]
