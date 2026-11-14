@@ -1,0 +1,14 @@
+{
+  "epochs": [
+    5,
+    10,
+    15,
+    20
+  ],
+  "reference_epoch": 20,
+  "probe_hf_corr": 0.0236035268753767,
+  "probe_hf_ratio": 0.5442730784416199,
+  "probe_hf_ratio_10m": 0.5053238868713379,
+  "probe_hf_corr_10m": 0.0232078954577446,
+  "note": "recomputed from epoch snapshots; single epoch, not the 18-20 window used elsewhere"
+}

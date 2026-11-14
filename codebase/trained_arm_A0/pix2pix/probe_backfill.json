@@ -8,5 +8,7 @@
   "reference_epoch": 20,
   "probe_hf_corr": 0.015798423439264297,
   "probe_hf_ratio": 0.7097093462944031,
+  "probe_hf_ratio_10m": 0.7241135835647583,
+  "probe_hf_corr_10m": 0.01428048312664032,
   "note": "recomputed from epoch snapshots; single epoch, not the 18-20 window used elsewhere"
 }
