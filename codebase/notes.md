@@ -16,3 +16,6 @@ memory.used [MiB], memory.total [MiB], utilization.gpu [%]
 5929 MiB, 24564 MiB, 99 %
 5929 MiB, 24564 MiB, 99 %
 5929 MiB, 24564 MiB, 99 %
+
+
+nvidia-smi --query-gpu=power.draw,power.limit,clocks.sm,clocks.max.sm --format=csv -l 5
