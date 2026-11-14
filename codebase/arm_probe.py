@@ -18,6 +18,12 @@ import torch
 
 PROBE_N = 128
 HF_SIGMA = 1.0
+
+# Registered primary: difference of Gaussians, so the band is bounded on both sides.
+# HF_SIGMA alone is a one-sided high-pass and keeps everything finer than ~2-3 px.
+BP_SIGMA_LO = 2.0
+BP_SIGMA_HI = 8.0
+
 N_BOOT = 1000
 BOOT_SEED = 12345
 CI_ALPHA = 0.05
@@ -48,6 +54,12 @@ def _blur(x, sigma):
     t = torch.nn.functional.conv2d(t, k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
     t = torch.nn.functional.conv2d(t, k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
     return t.permute(0, 2, 3, 1)
+
+
+def _corr(a, b):
+    """Per-patch per-band Pearson correlation over the spatial dimensions of NHWC."""
+    cov = (a * b).mean((1, 2)) - a.mean((1, 2)) * b.mean((1, 2))
+    return cov / (a.std((1, 2)) * b.std((1, 2)) + 1e-12)
 
 
 def _load_scene_ids(data_dir, split, n_patches):
@@ -133,6 +145,7 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
     try:
         d_real, d_fake, d_shuf = [], [], []
         hf_num, hf_den, sd_num, sd_den, hf_corr = [], [], [], [], []
+        bp_num, bp_den, bp_corr = [], [], []
 
         for s in range(0, len(probe["indices"]), batch):
             sl = slice(s, s + batch)
@@ -163,6 +176,12 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
             hf_corr.append(
                 (cov / (f_hf.std((1, 2)) * r_hf.std((1, 2)) + 1e-12)).cpu().numpy())
 
+            f_bp = _blur(fake_B, BP_SIGMA_LO) - _blur(fake_B, BP_SIGMA_HI)
+            r_bp = _blur(real_B, BP_SIGMA_LO) - _blur(real_B, BP_SIGMA_HI)
+            bp_num.append(f_bp.std((1, 2)).cpu().numpy())
+            bp_den.append(r_bp.std((1, 2)).cpu().numpy())
+            bp_corr.append(_corr(f_bp, r_bp).cpu().numpy())
+
         d_real = np.concatenate(d_real)
         d_fake = np.concatenate(d_fake)
         d_shuf = np.concatenate(d_shuf)
@@ -170,6 +189,8 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
         hf = np.concatenate(hf_num) / (np.concatenate(hf_den) + 1e-12)
         sd = np.concatenate(sd_num) / (np.concatenate(sd_den) + 1e-12)
         corr = np.concatenate(hf_corr)
+        bp = np.concatenate(bp_num) / (np.concatenate(bp_den) + 1e-12)
+        bpc = np.concatenate(bp_corr)
         land = [b for b in LAND_BANDS if b < hf.shape[1]]
         native = [b for b in NATIVE_10M_BANDS if b < hf.shape[1]]
 
@@ -188,6 +209,9 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
             "probe_hf_ratio_10m": float(hf[:, native].mean()),
             "probe_hf_corr": float(corr[:, land].mean()),
             "probe_hf_corr_10m": float(corr[:, native].mean()),
+            "probe_bp_ratio_10m": float(bp[:, native].mean()),
+            "probe_bp_corr_10m": float(bpc[:, native].mean()),
+            "probe_bp_corr": float(bpc[:, land].mean()),
             "probe_std_ratio": float(sd[:, land].mean()),
             "probe_margin_real_fake": float(m),
             "probe_margin_real_fake_lo": m_lo,

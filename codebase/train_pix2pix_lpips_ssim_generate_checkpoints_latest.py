@@ -547,6 +547,9 @@ history = {
     "probe_hf_ratio_10m": [],
     "probe_hf_corr": [],
     "probe_hf_corr_10m": [],
+    "probe_bp_ratio_10m": [],
+    "probe_bp_corr_10m": [],
+    "probe_bp_corr": [],
     "probe_std_ratio": [],
     "probe_margin_real_fake": [],
     "probe_margin_real_fake_lo": [],
@@ -838,15 +841,19 @@ def save_detailed_training_plots():
         [
             history["probe_hf_ratio"],
             history["probe_hf_ratio_10m"],
+            history["probe_bp_ratio_10m"],
             history["probe_hf_corr"],
             history["probe_hf_corr_10m"],
+            history["probe_bp_corr_10m"],
             history["probe_std_ratio"],
         ],
         [
             "land-band HF std ratio",
             "native 10 m HF std ratio",
+            "native 10 m band-pass std ratio",
             "land-band HF correlation",
             "native 10 m HF correlation",
+            "native 10 m band-pass correlation",
             "within-patch std ratio",
         ],
         "Generator Detail vs Target (128 fixed val patches)",
@@ -1491,7 +1498,9 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
         f" | probe D(f): {probe_metrics['probe_D_out_fake']:.4f}"
         f" | HF: {probe_metrics['probe_hf_ratio']:.4f}"
         f" | HF10m: {probe_metrics['probe_hf_ratio_10m']:.4f}"
+        f" | BP10m: {probe_metrics['probe_bp_ratio_10m']:.4f}"
         f" | HFcorr: {probe_metrics['probe_hf_corr']:.4f}"
+        f" | BPcorr10m: {probe_metrics['probe_bp_corr_10m']:.4f}"
         f" | std: {probe_metrics['probe_std_ratio']:.4f}"
         f" | M: {probe_metrics['probe_margin_real_fake']:.4f}"
         f" [{probe_metrics['probe_margin_real_fake_lo']:.4f},"

@@ -38,6 +38,7 @@ ARMS = {
     "A3": True,
     "A3-g3": True,
     "A3-g10": True,
+    "L1-only": True,
 }
 EPOCHS = (5, 10, 15, 20)
 
@@ -115,9 +116,12 @@ def main():
                 kept = "  [kept training-time scores]"
             found[ep] = metrics
             print(f"{arm} epoch {ep:3d} ({src}):  "
+                  f"bp_corr_10m {metrics['probe_bp_corr_10m']:.4f}  "
+                  f"bp_ratio_10m {metrics['probe_bp_ratio_10m']:.4f}  "
                   f"hf_ratio {metrics['probe_hf_ratio']:.4f}  "
                   f"hf_ratio_10m {metrics['probe_hf_ratio_10m']:.4f}  "
                   f"hf_corr {metrics['probe_hf_corr']:.4f}  "
+                  f"hf_corr_10m {metrics['probe_hf_corr_10m']:.4f}  "
                   f"M {metrics['probe_margin_real_fake']:+.4f}  "
                   f"C {metrics['probe_margin_real_shuf']:+.4f}{kept}")
 
@@ -126,13 +130,15 @@ def main():
             continue
 
         last = max(found)
+        keep = ("probe_hf_corr", "probe_hf_ratio", "probe_hf_ratio_10m",
+                "probe_hf_corr_10m", "probe_bp_ratio_10m", "probe_bp_corr_10m",
+                "probe_bp_corr")
         with open(os.path.join(save_dir, "probe_backfill.json"), "w") as f:
             json.dump({"epochs": sorted(found),
                        "reference_epoch": last,
-                       "probe_hf_corr": found[last]["probe_hf_corr"],
-                       "probe_hf_ratio": found[last]["probe_hf_ratio"],
-                       "probe_hf_ratio_10m": found[last]["probe_hf_ratio_10m"],
-                       "probe_hf_corr_10m": found[last]["probe_hf_corr_10m"],
+                       **{k: found[last][k] for k in keep},
+                       "per_epoch": {str(e): {k: found[e][k] for k in keep}
+                                     for e in sorted(found)},
                        "note": "recomputed from epoch snapshots; single epoch, "
                                "not the 18-20 window used elsewhere"},
                       f, indent=2)
