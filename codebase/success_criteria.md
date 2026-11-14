@@ -249,6 +249,180 @@ repository. If it has been deleted, A3-g3 must be rerun at seed 42 before the co
 can be made - the arm is reproducible to the windowed means but not bit-identical, so a
 rerun is a new sample, not a recovery of the old one.
 
+### Amendment, 2026-11-14 (second): verdict, T retired, finals changed
+
+Written **after** the L1-only control finished and the registered primary was computed.
+The verdict below follows the rule exactly as registered above; nothing was reweighted
+after seeing it.
+
+**Verdict (indicative): L1-only is preferred over A3-g3.** The primary fails.
+
+| role | metric | A3-g3 | L1-only | |
+|---|---|---|---|---|
+| primary | band-pass corr, DoG sigma 2-8, native 10 m | 0.1481 | **0.1821** | FAIL, -18.7% |
+| guard | `val_L1`, mean epochs 18-20, limit 1.05x | 0.07879 | 0.07513 | pass, limit 0.07889 |
+| guard | NDVI / NDWI MAE and bias | - | - | not implemented |
+
+**Indicative, not final.** One seed per arm, and the primary is a single epoch whose
+trajectory scatters about 15% epoch to epoch against an 18.7% gap. The direction is
+consistent across two independent scale bands and across the whole lambda ladder, which
+is why it is reported at all; the 3-seed finals decide it. The `val_L1` guard at the
+tightened 1.05x tolerance passes by **0.0001**, which is inside noise and should be read
+as "not clearly worse" rather than as a pass.
+
+The primary decides, so the pending NDVI/NDWI guard and the reported metrics (KID, PSD,
+HF ratio, `hf_corr`) cannot reverse it. They are still worth computing to characterise
+*how* the two differ, and that work is now descriptive rather than selective.
+
+**The estimator is epoch 20, not the 18-20 window.** `checkpoint_every = 5`, so no arm
+has snapshots at epochs 18 or 19 and the window cannot be reconstructed for a metric
+added after the fact. It is the same single epoch for every arm, and the probe is
+deterministic given the weights - the backfill reproduced every previously logged
+epoch-20 figure to 0.0% - so there is no estimator noise. There is still trajectory
+noise: `probe_hf_corr` scatters about 15% epoch to epoch. The -18.7% gap sits well
+outside that, and the 3-seed finals will settle it properly. The `val_L1` guard does use
+the registered 18-20 mean.
+
+**The headline result.** Across lambda_GAN in {0, 1, 3, 10}, with the discriminator
+configuration held fixed, band-pass energy rises and band-pass correlation falls,
+monotonically, with no exception:
+
+| lambda_GAN | 20-80 m ratio | 20-80 m corr | 10-30 m ratio | 10-30 m corr |
+|---|---|---|---|---|
+| 0 (L1-only) | 0.4929 | **0.1821** | 0.1416 | **0.0423** |
+| 1 (A3) | 0.9312 | 0.1613 | 0.4410 | 0.0251 |
+| 3 (A3-g3) | 1.1946 | 0.1481 | 0.6786 | 0.0206 |
+| 10 (A3-g10) | 1.2069 | 0.1276 | 0.7911 | 0.0139 |
+| | r = -0.925 | | r = -0.981 | |
+
+Two independently defined scale bands, same sign, both near -1. Three further points:
+
+- Correlation at 20-80 m is roughly 4x that at 10-30 m. SAR carries medium-scale
+  structure and very little fine texture, which is what the corrected PSD says
+  independently (20-35% of target power at 640 m, about 1% at 25 m).
+- The adversarial penalty grows as the band gets finer: A3-g3 loses 18.7% at 20-80 m
+  and 51.3% at 10-30 m; A3-g10 loses 29.9% and 67.1%.
+- At lambda 3 and 10 the band-pass energy ratio **exceeds 1.0** (1.19, 1.21). Those arms
+  emit more 20-80 m structure than the targets contain: over-generation.
+
+**Correlation alone understates what the adversarial term contributes.** Decomposing the
+predicted band-pass field into the part aligned with the target and the part orthogonal
+to it, both as a fraction of the target's band-pass standard deviation:
+
+| lambda_GAN | rho | ratio | correct = rho x ratio | wrong = sqrt(1-rho^2) x ratio |
+|---|---|---|---|---|
+| 0 (L1-only) | 0.1821 | 0.4929 | 0.0898 | 0.4847 |
+| 1 (A3) | 0.1613 | 0.9312 | 0.1502 (+67%) | 0.9190 (+90%) |
+| 3 (A3-g3) | 0.1481 | 1.1946 | **0.1769 (+97%)** | 1.1814 (+144%) |
+| 10 (A3-g10) | 0.1276 | 1.2069 | 0.1540 (+72%) | 1.1970 (+147%) |
+
+These are **standard-deviation (amplitude) units, not power**; squaring gives the
+variance share, which is 0.008 for L1-only against 0.031 for A3-g3.
+
+So the adversarial term does recover real structure - A3-g3 reproduces roughly twice as
+much correctly oriented 20-80 m amplitude as L1-only, and the correct component **peaks
+at lambda 3** before falling again at lambda 10. Correlation declines because the
+orthogonal component grows faster than the aligned one, not because the aligned one is
+absent. The honest statement is that the adversarial term adds both true and false
+structure, and adds false structure faster.
+
+A3 at lambda 1 reaches a band-pass energy ratio of 0.9312, the closest any arm gets to
+the target spectrum, and still correlates worse than L1-only. Matching the energy
+spectrum and being correct are separable, which is the direct reason T is retired below.
+
+A_base scores second on the primary (0.1696) with a near-L1 energy ratio (0.5131),
+consistent with its discriminator having saturated into irrelevance. It is corroboration
+only: A_base, A0 and A1 differ from the lambda ladder in D configuration as well, so they
+are not additional points on the same curve.
+
+**Criterion T is retired as pass/fail.** T required `probe_hf_ratio` >= A_base + 0.05,
+i.e. it scored high-frequency *energy*. L1-only fails T at 0.1542 while being the best
+arm on the registered primary and on `val_L1`. Applied as written, the selection rule
+"highest `probe_hf_ratio` among arms passing S1-S3 and F" would have chosen A3-g10 - the
+arm with the lowest correlation at both scales and a discriminator at chance on M. T
+selects for hallucination. The 2026-11-08 amendment already warned that a selected run
+"must not be described as having better texture unless `hf_corr` also moves"; this is
+that warning coming due.
+
+T is replaced by:
+
+- **T (new)**: `probe_bp_corr_10m`, DoG sigma 2 minus sigma 8, bands B2/B3/B4/B8.
+  Reported for every arm. No absolute threshold - it is the primary of a pairwise
+  comparison, not a bar to clear.
+- `probe_hf_ratio_10m`, `probe_hf_corr_10m` and `probe_bp_ratio_10m` are reported
+  alongside so that energy and correctness stay visible as separate quantities.
+
+Retiring a criterion after seeing the result it decides is recorded here deliberately.
+The verdict above does not depend on it: T was never part of the A3-g3 vs L1-only rule.
+
+**Final runs change to two configurations, not one.** Originally the finals were "the
+winning configuration". That no longer makes sense: the comparison *is* the result, and
+a claim that the adversarial term does not help needs an interval on both sides of it.
+
+- **L1-only and A3-g3, 3 seeds each, N = 50 epochs**, constant LR for epochs 1-35,
+  linear decay to zero over 36-50 applied equally to G and D, last checkpoint as the
+  result.
+- Seeds 42, 43, 44, fixed in advance.
+- `probe_bp_corr_10m` and `probe_bp_ratio_10m` are logged by the probe every epoch, so
+  the finals get the registered 48-50 window directly from `history.csv`. No snapshot
+  backfill is needed and `checkpoint_every` stays at 5.
+- Pre-registered abort, carried over: if any A3-g3 seed's M falls to chance over its
+  scoring window, that seed's texture numbers are reported as non-adversarial and
+  excluded from any claim about what the discriminator contributed.
+
+**SSIM is not a blocker.** It is inert as configured - 86-100% of 11x11 windows sit
+below sqrt(C2), and the normalised and DN choices of `data_range` are the identical
+constraint, so no faithful value fixes it. It is excluded from the final method rather
+than repaired, and every arm ran with `use_ssim=False` and `use_lpips=False`, which
+matches what the finals will run. Recorded as a limitation, not an open task.
+
+### Amendment, 2026-11-14 (third): frozen spec for KID and the spectral indices
+
+Written **before** either metric was computed, so the choices below cannot be tuned to a
+result. Both are descriptive: the verdict above is already settled by the primary.
+
+**Split.** Both are computed on the **full validation split**, not the 128-patch probe
+and not the test split. The arms were selected on validation; test stays untouched until
+the finals are reported.
+
+**Checkpoint.** Epoch 20 `netG` for every arm, the same epoch the primary used.
+
+**KID rather than FID.** FID estimates a 2048x2048 covariance; the splits here are a few
+thousand patches, so it is strongly biased and N-dependent, and two runs scored on
+different N are not comparable. KID is an unbiased MMD estimator with a usable spread
+across subsets. FID is not reported.
+
+- `torchmetrics.image.kid.KernelInceptionDistance`, `subset_size` and `subsets` written
+  into the output JSON with the result.
+- Reported as mean +- std across subsets. A bare point estimate is not reported.
+- **Two channel triples**, because Inception takes three and the data has thirteen:
+  true colour B4/B3/B2, and false colour B8/B4/B3. The second brings the NIR band into
+  the measurement; all four bands are native 10 m. Seven of thirteen bands remain
+  unmeasured by KID and that is stated with the number.
+- 8-bit mapping from **training-split p2-p98 windows per band**, frozen in
+  `kid_stretch.json` and never derived from validation or test. B4/B3/B2 reuse the
+  windows already used for every figure in the thesis; B8 is added by the same recipe.
+- Resize 256 -> 299 bilinear, `antialias=True`. The resampling choice measurably moves
+  KID, so it is recorded rather than left to a default.
+
+**NDVI and NDWI.**
+
+- `NDVI = (B8 - B4) / (B8 + B4)`, `NDWI = (B3 - B8) / (B3 + B8)`. Indices 7, 3, 2 in the
+  13-band layout; all three bands are native 10 m.
+- Computed in **reflectance**, after the `S2_clip.json` inverse. A ratio is not invariant
+  to the affine map to [-1, 1], so computing it in normalised space would give a
+  plausible-looking number that means nothing.
+- Denominator guard: pixels where the ground-truth sum falls below a fixed DN floor are
+  excluded, and **the excluded fraction is reported**. Clamping silently is not an option
+  because the clamp would land differently for a blurry and a sharp prediction.
+- **MAE and signed bias are both reported.** MAE alone cannot distinguish a model that
+  scatters around the truth from one that is consistently high or low, and an index
+  built from a regression-to-the-mean predictor is expected to be biased toward zero.
+- Reported **split by ground-truth water**, thresholded at NDWI > 0, as well as pooled.
+  NDWI is most informative over water and SAR is most distinctive there, so a pooled
+  mean would let a model that is right on land and wrong on water hide.
+
+
 **Known untested factor.** The 100-epoch reference run ended at a +81% train/val gap
 with val L1 flat from epoch 20. Augmentation is the one intervention never tried in this
 project and it is not part of this grid. The N = 50 final runs will carry a substantial

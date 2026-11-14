@@ -20,7 +20,6 @@ S1_D_OUT_FAKE = 0.10
 S1_D_LOSS = 0.02
 S2_G_GAN = 0.90
 S3_RATIO = 0.50
-T_OVER_BASE = 0.05
 F_TOLERANCE = 1.10
 
 # lambda_GAN = 0, so D never reaches G: its stability numbers describe a generator it
@@ -68,12 +67,23 @@ def hf_corr(armname, rows):
     if v is not None:
         return v, ""
 
-    path = f"trained_arm_{armname}/pix2pix/probe_backfill.json"
-    if os.path.isfile(path):
-        with open(path) as f:
-            b = json.load(f)
+    b = _backfill(armname)
+    if b:
         return b["probe_hf_corr"], f" (back-filled, epoch {b['reference_epoch']})"
     return None, " (not measured)"
+
+
+def _backfill(armname):
+    path = f"trained_arm_{armname}/pix2pix/probe_backfill.json"
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def backfill_value(armname, key):
+    b = _backfill(armname)
+    return b.get(key) if b else None
 
 
 def pooled_margin(files, pos, neg, n_boot=1000, seed=12345, alpha=0.05):
@@ -141,21 +151,24 @@ def evaluate(armname, rows, base, is_reference=False):
                  f"mean(18-20)/mean(9-11) {ratio if ratio is None else round(ratio, 3)}")
 
     hf = window_mean(rows, "probe_hf_ratio", LATE)
-    hf_base = window_mean(base, "probe_hf_ratio", LATE) if base else None
     hf10 = window_mean(rows, "probe_hf_ratio_10m", LATE)
-    hf10_note = (", 10m n/a" if hf10 is None else f", 10m {round(hf10, 4)}")
     l1 = window_mean(rows, "val_L1", LATE)
     l1_base = window_mean(base, "val_L1", LATE) if base else None
 
-    # T and F are defined relative to A_base, so the reference arm only supplies them.
+    # T was retired on 2026-11-14: it scored high-frequency energy, and energy is
+    # anti-correlated with correctness across the lambda_GAN ladder (r = -0.93).
+    # The band-pass correlation replaces it, reported without a verdict.
+    bp = backfill_value(armname, "probe_bp_corr_10m")
+    if bp is None:
+        bp = window_mean(rows, "probe_bp_corr_10m", LATE)
+    out["T"] = (None,
+                f"bp_corr_10m {'n/a' if bp is None else round(bp, 4)}, "
+                f"hf_ratio {'n/a' if hf is None else round(hf, 4)}, "
+                f"hf_ratio_10m {'n/a' if hf10 is None else round(hf10, 4)}  [reported]")
+
     if is_reference:
-        out["T"] = (None, f"HF {hf if hf is None else round(hf, 4)}{hf10_note} "
-                          f"(reference value)")
         out["F"] = (None, f"val_L1 {l1 if l1 is None else round(l1, 5)} (reference value)")
     else:
-        out["T"] = (hf is not None and hf_base is not None and hf >= hf_base + T_OVER_BASE,
-                    f"HF {hf if hf is None else round(hf, 4)}{hf10_note}"
-                    + (f", needs >= {round(hf_base + T_OVER_BASE, 4)}" if hf_base else ""))
         out["F"] = (l1 is not None and (l1_base is None or l1 <= F_TOLERANCE * l1_base),
                     f"val_L1 {l1 if l1 is None else round(l1, 5)}"
                     + (f", limit {round(F_TOLERANCE * l1_base, 5)}" if l1_base else ""))
