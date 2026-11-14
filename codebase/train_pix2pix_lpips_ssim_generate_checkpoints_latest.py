@@ -64,9 +64,11 @@ def set_seed(s: int):
     np.random.seed(s)
     torch.manual_seed(s)
     torch.cuda.manual_seed_all(s)
-    # Costs throughput, but config comparisons are meaningless without it.
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    # These never bought bit-reproducibility: non-cuDNN reductions stay unordered, and
+    # two A_base runs at seed 42 already differ by 3.75e-3 after one epoch. Input shapes
+    # are fixed, so autotuning is free speed. See the 2026-11-14 (fourth) amendment.
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 set_seed(seed)

@@ -422,6 +422,40 @@ across subsets. FID is not reported.
   NDWI is most informative over water and SAR is most distinctive there, so a pooled
   mean would let a model that is right on land and wrong on water hide.
 
+### Amendment, 2026-11-14 (fourth): cuDNN autotuning enabled for the final runs
+
+Decided **before any final run started**, and applied uniformly to all nine.
+
+`cudnn.deterministic=True` / `benchmark=False` were set to make config comparisons
+exact. They never achieved that. Those flags constrain cuDNN convolution algorithms
+only; the remaining CUDA reductions and atomics still accumulate in an unspecified
+order, and float addition is not associative. The reproduction check in `check_arms.py`
+measures the result directly - two A_base runs at seed 42, same code and data, differ
+after a single epoch:
+
+| metric | run 1 | run 2 | diff |
+|---|---|---|---|
+| `train_G_L1_raw` | 0.106306 | 0.106631 | 3.26e-04 |
+| `train_D_out_fake` | 0.222166 | 0.218416 | 3.75e-03 |
+| `train_G_GAN` | 0.690076 | 0.695282 | 5.21e-03 |
+
+So the setting cost throughput for a guarantee that was never in force. It is now
+`deterministic=False`, `benchmark=True`. Input shapes are constant - 256x256, batch 16,
+`drop_last=True` - which is the case autotuning is designed for, worth roughly 10-25%.
+
+Scope and cost:
+
+- **All nine final runs use the new setting.** Mixing it within the finals would
+  confound the comparison they exist to make.
+- The seven 20-epoch arms ran with the old setting. Any numeric comparison between the
+  arm study and the finals carries that caveat, though the effect is of order 1e-6 per
+  operation, far below the seed-to-seed spread the finals are measuring.
+- Conclusions rest on windowed means over the last three epochs, which reproduced to
+  0.07% even under the old setting.
+- AMP and `channels_last` were considered and rejected: both change numerics enough to
+  plausibly affect GAN stability, which would make the finals test a different method
+  than the arms did.
+
 
 **Known untested factor.** The 100-epoch reference run ended at a +81% train/val gap
 with val L1 flat from epoch 20. Augmentation is the one intervention never tried in this

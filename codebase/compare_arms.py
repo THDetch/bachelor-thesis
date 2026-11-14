@@ -19,8 +19,8 @@ LAMBDA = {"A_base": 1, "A0": 1, "A1": 1, "A3": 1,
 TREATMENT = "A3-g3"
 CONTROL = "L1-only"
 LATE = (18, 20)        # registered window for the val_L1 guard
-F_TOLERANCE = 1.10
-NDVI_TOLERANCE = 0.05  # guard not yet implemented
+F_TOLERANCE = 1.05
+NDVI_TOLERANCE = 1.05
 
 
 def history(arm):
@@ -42,6 +42,14 @@ def window_mean(rows, key, window=LATE):
 
 def backfill(arm):
     path = f"trained_arm_{arm}/pix2pix/probe_backfill.json"
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def kid_indices(arm):
+    path = f"trained_arm_{arm}/pix2pix/kid_indices.json"
     if not os.path.isfile(path):
         return None
     with open(path) as f:
@@ -131,20 +139,91 @@ def main():
     ok_l1 = t["val_L1"] <= limit
     print(f"  GUARD    val_L1 (mean 18-20)      {t['val_L1']:.5f} vs limit "
           f"{limit:.5f}  -> {'PASS' if ok_l1 else 'FAIL'}")
-    print(f"  GUARD    NDVI/NDWI MAE within {NDVI_TOLERANCE:.0%}   "
-          f"not implemented -> PENDING")
+
+    kt, kc = kid_indices(TREATMENT), kid_indices(CONTROL)
+    ok_idx = None
+    if kt and kc:
+        ok_idx = True
+        for name, key in (("NDVI", "ndvi_mae"), ("NDWI", "ndwi_mae")):
+            lim = NDVI_TOLERANCE * kc[key]
+            ok = kt[key] <= lim
+            ok_idx = ok_idx and ok
+            print(f"  GUARD    {name} MAE within {NDVI_TOLERANCE - 1:.0%}        "
+                  f"{kt[key]:.5f} vs limit {lim:.5f}  -> {'PASS' if ok else 'FAIL'}")
+    else:
+        print(f"  GUARD    NDVI/NDWI MAE            "
+              f"no kid_indices.json -> PENDING")
 
     print("\n  Reported, no pass/fail: KID, PSD ratio 30-100 m, HF ratio, hf_corr")
 
     if not ok_primary:
         print(f"\n  VERDICT  primary fails -> {CONTROL} preferred. "
               f"Guards and reported metrics cannot reverse it.")
-    elif ok_l1:
-        print(f"\n  VERDICT  primary passes, val_L1 guard passes, "
-              f"NDVI/NDWI guard pending.")
+    elif ok_idx is None:
+        print(f"\n  VERDICT  primary passes, val_L1 guard "
+              f"{'passes' if ok_l1 else 'FAILS'}, NDVI/NDWI guard pending.")
+    elif ok_l1 and ok_idx:
+        print(f"\n  VERDICT  primary and both guards pass -> {TREATMENT} preferred.")
     else:
-        print(f"\n  VERDICT  primary passes but the val_L1 guard fails "
+        print(f"\n  VERDICT  primary passes but a guard fails "
               f"-> {CONTROL} preferred.")
+
+    report_kid_indices(data)
+
+
+def report_kid_indices(data):
+    k = {a: kid_indices(a) for a in data}
+    k = {a: v for a, v in k.items() if v}
+    if not k:
+        print("\n[note] no kid_indices.json found; run eval_kid_indices.py")
+        return
+
+    ref = next(iter(k.values()))
+    print(f"\n=== KID and spectral indices, {ref['split']} split, "
+          f"{ref['n_patches']} patches, epoch {ref['epoch']} ===")
+    print(f"    KID {ref['kid_subsets']} subsets x {ref['kid_subset_size']}, "
+          f"index floor {ref['index_dn_floor']:.0f} DN, "
+          f"masked {ref['masked_fraction']:.1e}")
+
+    print(f"\n{'arm':9} {'lam':>4} | {'KID true colour':>17} {'KID false colour':>18}"
+          f" | {'NDVI mae':>9} {'NDVI bias':>10} {'NDWI mae':>9} {'NDWI bias':>10}")
+    for a in sorted(k, key=lambda x: k[x]["kid_rgb_mean"]):
+        r = k[a]
+        print(f"{a:9} {LAMBDA[a]:4d} | "
+              f"{r['kid_rgb_mean']:9.4f}+-{r['kid_rgb_std']:<6.4f} "
+              f"{r['kid_false_colour_mean']:10.4f}+-{r['kid_false_colour_std']:<6.4f}"
+              f" | {r['ndvi_mae']:9.4f} {r['ndvi_bias']:+10.4f} "
+              f"{r['ndwi_mae']:9.4f} {r['ndwi_bias']:+10.4f}")
+
+    print(f"\n  split by ground-truth water (NDWI > 0)")
+    print(f"{'arm':9} {'lam':>4} | {'NDVI mae land':>14} {'NDVI bias land':>15}"
+          f" | {'NDWI mae water':>15} {'NDWI bias water':>16}")
+    for a in sorted(k, key=lambda x: k[x]["ndvi_land_mae"]):
+        r = k[a]
+        print(f"{a:9} {LAMBDA[a]:4d} | {r['ndvi_land_mae']:14.4f} "
+              f"{r['ndvi_land_bias']:+15.4f} | {r['ndwi_water_mae']:15.4f} "
+              f"{r['ndwi_water_bias']:+16.4f}")
+
+    if TREATMENT not in k or CONTROL not in k:
+        return
+    t, c = k[TREATMENT], k[CONTROL]
+    print(f"\n  {TREATMENT} vs {CONTROL}, lower is better on all of these:")
+    for label, key in (("KID true colour", "kid_rgb_mean"),
+                       ("KID false colour", "kid_false_colour_mean"),
+                       ("NDVI MAE", "ndvi_mae"),
+                       ("NDWI MAE", "ndwi_mae"),
+                       ("NDVI MAE land", "ndvi_land_mae"),
+                       ("NDWI MAE water", "ndwi_water_mae")):
+        d = 100 * (t[key] - c[key]) / abs(c[key])
+        print(f"    {label:18} {t[key]:8.4f} vs {c[key]:8.4f}  {d:+7.1f}%  "
+              f"-> {TREATMENT if d < 0 else CONTROL} better")
+
+    for label, key in (("true colour", "kid_rgb_mean"),
+                       ("false colour", "kid_false_colour_mean")):
+        sd = (t[key.replace("mean", "std")] ** 2
+              + c[key.replace("mean", "std")] ** 2) ** 0.5
+        print(f"    KID {label} gap is {abs(t[key] - c[key]) / sd:.1f}x the "
+              f"combined subset sd")
 
 
 if __name__ == "__main__":
