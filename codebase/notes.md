@@ -19,3 +19,8 @@ memory.used [MiB], memory.total [MiB], utilization.gpu [%]
 
 
 nvidia-smi --query-gpu=power.draw,power.limit,clocks.sm,clocks.max.sm --format=csv -l 5
+
+(base) dll1801@DEGGS111PC16:~/mdpi_manuscript/code/bachelor-thesis/codebase$ nvidia-smi --query-gpu=power.draw,power.limit,clocks.sm,clocks.max.sm --format=csv -l 5
+power.draw [W], power.limit [W], clocks.current.sm [MHz], clocks.max.sm [MHz]
+210.71 W, 230.00 W, 1785 MHz, 2100 MHz
+214.03 W, 230.00 W, 1590 MHz, 2100 MHz
