@@ -37,7 +37,9 @@ from arm_probe import load_probe, run_probe, _load_scene_ids
 # -----------------------------------------------------------------------------
 # Device setup
 # -----------------------------------------------------------------------------
-gpu_id = 0
+# Env overrides so the finals can be launched as separate processes without editing
+# this file nine times: ARM, SEED, EPOCHS, LINEAR_DECAY_START, GPU_ID.
+gpu_id = int(os.environ.get("GPU_ID", 0))
 
 if torch.cuda.is_available():
     torch.cuda.set_device(gpu_id)
@@ -54,7 +56,7 @@ else:
 # -----------------------------------------------------------------------------
 # Reproducibility
 # -----------------------------------------------------------------------------
-seed = 42
+seed = int(os.environ.get("SEED", 42))
 
 
 def set_seed(s: int):
@@ -96,12 +98,14 @@ ARM_CONFIG = {
     "L1-only": dict(strip_norm=True,  mismatch=True,  lambda_GAN=0.0),
 }
 
-arm = "L1-only"
+arm = os.environ.get("ARM", "L1-only")
+if arm not in ARM_CONFIG:
+    raise SystemExit(f"unknown ARM {arm!r}; expected one of {sorted(ARM_CONFIG)}")
 
 strip_norm_from_D = ARM_CONFIG[arm]["strip_norm"]
 use_mismatch = ARM_CONFIG[arm]["mismatch"]
 
-epochs = 20
+epochs = int(os.environ.get("EPOCHS", 20))
 batch_size = 16
 
 # G and D start with the same LR.
@@ -127,6 +131,11 @@ lr_decay_factor = 0.5
 lr_min = 1e-6
 decay_after_warmup_only = True  # Avoid decaying D before it even starts training
 decay_starting_epoch = warmup_g_only_epochs
+
+# Registered schedule for the final runs: constant, then linear to zero, same factor on
+# G and D. Takes precedence over use_lr_decay. None disables it.
+linear_decay_start_epoch = (int(os.environ["LINEAR_DECAY_START"])
+                            if os.environ.get("LINEAR_DECAY_START") else None)
 # If you resume from an old checkpoint and want to force both optimizers to a new LR,
 # set this to 5e-5, or to {"G": 5e-5, "D": 2.5e-5}. Leave as None for normal checkpoint resume.
 set_lrs_on_resume  = None
@@ -137,7 +146,9 @@ allow_resume = False
 data_dir = "dataset_all_seasons_scenesplit"
 
 model_name = "pix2pix"
-run_name = f"arm_{arm}"
+# Seed is in the directory name: the finals run the same arm at 42/43/44 and would
+# otherwise overwrite each other.
+run_name = f"arm_{arm}_s{seed}"
 save_dir = f"trained_{run_name}/{model_name}"
 
 
@@ -229,6 +240,9 @@ train_loader, val_loader = get_train_val_loaders(
     channel_select=input_channel_select,
     drop_last=True,   # a ragged final batch gives noisy BatchNorm statistics
     return_index=use_mismatch,
+    # Two persistent loaders per run, so concurrent runs multiply this. Lower it when
+    # several finals share one machine.
+    num_workers=int(os.environ.get("NUM_WORKERS", 16)),
 )
 
 monitor_batch = next(iter(val_loader))
@@ -333,7 +347,18 @@ optimizer_D = torch.optim.Adam(netD.parameters(), lr=lr_D, betas=(0.5, 0.999))
 scheduler_G = None
 scheduler_D = None
 
-if use_lr_decay:
+if linear_decay_start_epoch is not None:
+    def _linear_factor(e):
+        """e is 0-based; constant until the start epoch, then linear to zero at `epochs`."""
+        first = linear_decay_start_epoch - 1
+        if e < first:
+            return 1.0
+        return max(0.0, 1.0 - (e - first + 1) / (epochs - first))
+
+    scheduler_G = torch.optim.lr_scheduler.LambdaLR(optimizer_G, _linear_factor)
+    scheduler_D = torch.optim.lr_scheduler.LambdaLR(optimizer_D, _linear_factor)
+
+elif use_lr_decay:
     scheduler_G = ReduceLROnPlateau(
         optimizer_G,
         mode="min",
@@ -1414,7 +1439,10 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     if decay_after_warmup_only and epoch < decay_starting_epoch:
         scheduler_active_this_epoch = False
 
-    if use_lr_decay and scheduler_active_this_epoch:
+    if linear_decay_start_epoch is not None:
+        scheduler_G.step()
+        scheduler_D.step()
+    elif use_lr_decay and scheduler_active_this_epoch:
         scheduler_G.step(metric_for_scheduler)
         scheduler_D.step(metric_for_scheduler)
 
