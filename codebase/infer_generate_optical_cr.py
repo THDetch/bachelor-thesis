@@ -20,13 +20,28 @@ else:
     print(f"[WARN] pix2pix repo not found at {gan_repo_path}; assuming wrapper is importable.")
 
 from mymodels.cp2pwrapper import Pix2PixWrapper  # must exist
+from checkpoint_select import resolve_generator
 
 # ---------- Defaults ----------
 # Point to the dataset you just created
 DEFAULT_DATA_DIR = "/home/dll0505/AdditionalStorage/thesis/sen12-ms-cr/dataset_cr_summer_test_2000"
 DEFAULT_RESULTS_DIR = "trained-full-copy/generated_cr_summer"
 DEFAULT_MODEL_DIR = "trained-full-copy/pix2pix"
-DEFAULT_MODEL_FILE = "pix2pix_best_netG.pth"
+DEFAULT_MODEL_FILE = None  # None -> resolve DEFAULT_CHECKPOINTS instead
+
+# "best" is best-by-val-L1, "last" is the final epoch. Different epochs, and selecting
+# on L1 favours the blurriest one, so both are generated into separate subdirectories.
+DEFAULT_CHECKPOINTS = ["best", "last"]
+
+# Fixed display windows in DN, keyed by 0-based band index, measured as p2-p98 over the
+# SEN12-MS training split. Applied to the cloudy panel too, so all three are mutually
+# comparable; clouds saturating to white is the correct rendering, not an artefact.
+# Set to None to fall back to a per-image stretch taken from the GT.
+FIXED_STRETCH_DN = {
+    3: (300.0, 3450.0),   # B4 red
+    2: (500.0, 2500.0),   # B3 green
+    1: (700.0, 2100.0),   # B2 blue
+}
 
 # ---------- S2 inverse using clip JSON ----------
 def load_s2_clip_json(path):
@@ -47,10 +62,13 @@ def inverse_from_tanh_using_clip(y_scaled, s2_clip):
     return y
 
 # ---------- RGB from S2 ----------
-def rgb_from_s2(y_orig, mode="global", percentiles=(2,98), gamma=1/2.2, blur_sigma=None):
+def rgb_from_s2(y_orig, mode="global", percentiles=(2,98), gamma=1/2.2, blur_sigma=None, ref=None):
     """
     y_orig: (H,W,13) original S2 units
     mode: "global" uses per-image min/max; "stretch" uses image percentile stretch
+    ref:  (H,W,13) to take the stretch limits from, so prediction, cloudy input and
+          ground truth are rendered identically. Stretching each by its own
+          statistics hides colour cast and radiometric bias.
     """
     # Band order: [B1,B2,B3,B4,B5,B6,B7,B8,B8A,B9,B10,B11,B12]
     B4 = y_orig[..., 3]
@@ -58,25 +76,31 @@ def rgb_from_s2(y_orig, mode="global", percentiles=(2,98), gamma=1/2.2, blur_sig
     B2 = y_orig[..., 1]
     rgb = np.stack([B4, B3, B2], axis=-1).astype(np.float32)
 
-    if mode == "stretch":
+    src = rgb if ref is None else np.stack(
+        [ref[..., 3], ref[..., 2], ref[..., 1]], axis=-1
+    ).astype(np.float32)
+
+    out = np.zeros_like(rgb, dtype=np.float32)
+
+    if FIXED_STRETCH_DN:
+        for c, b in enumerate((3, 2, 1)):
+            lo, hi = FIXED_STRETCH_DN[b]
+            out[..., c] = np.clip((rgb[..., c] - lo) / (hi - lo + 1e-9), 0, 1)
+    elif mode == "stretch":
         lo_pct, hi_pct = percentiles
-        out = np.zeros_like(rgb, dtype=np.float32)
         for c in range(3):
-            ch = rgb[..., c]
-            lo = np.percentile(ch, lo_pct)
-            hi = np.percentile(ch, hi_pct)
+            lo = np.percentile(src[..., c], lo_pct)
+            hi = np.percentile(src[..., c], hi_pct)
             if hi <= lo:
-                lo, hi = float(ch.min()), float(ch.max())
-            ch01 = np.clip((ch - lo) / (hi - lo + 1e-9), 0, 1)
-            out[..., c] = ch01
+                lo, hi = float(src[..., c].min()), float(src[..., c].max())
+            out[..., c] = np.clip((rgb[..., c] - lo) / (hi - lo + 1e-9), 0, 1)
     else:
-        # conservative global per-image min/max
-        out = np.zeros_like(rgb, dtype=np.float32)
         for c in range(3):
-            ch = rgb[..., c]
-            lo = float(ch.min()); hi = float(ch.max())
-            if hi <= lo: hi = lo + 1.0
-            out[..., c] = np.clip((ch - lo) / (hi - lo), 0, 1)
+            lo = float(src[..., c].min())
+            hi = float(src[..., c].max())
+            if hi <= lo:
+                hi = lo + 1.0
+            out[..., c] = np.clip((rgb[..., c] - lo) / (hi - lo), 0, 1)
 
     if gamma is not None:
         out = np.power(out, gamma)
@@ -129,16 +153,17 @@ def concat_h(imgs, pad=4, pad_color=220):
     return out
 
 # ---------- Model loader ----------
-def load_model(model_dir, model_file, in_ch, out_ch, img_size, device):
-    mp = Path(model_dir) / model_file
-    if not mp.exists():
-        raise FileNotFoundError(f"Model not found: {mp}")
+def load_model(model_dir, model_file, in_ch, out_ch, img_size, device, state=None):
     model = Pix2PixWrapper(in_channels=in_ch, out_channels=out_ch, img_size=img_size)
-    # safer load (PyTorch >= 2.4); if your torch is older, drop weights_only
-    try:
-        state = torch.load(str(mp), map_location=device, weights_only=True)
-    except TypeError:
-        state = torch.load(str(mp), map_location=device)
+    if state is None:
+        mp = Path(model_dir) / model_file
+        if not mp.exists():
+            raise FileNotFoundError(f"Model not found: {mp}")
+        # safer load (PyTorch >= 2.4); if your torch is older, drop weights_only
+        try:
+            state = torch.load(str(mp), map_location=device, weights_only=True)
+        except TypeError:
+            state = torch.load(str(mp), map_location=device)
     model.load_state_dict(state)
     model = model.to(device)
     model.eval()
@@ -149,7 +174,7 @@ def infer_from_numpy(
     data_dir, out_dir, model_dir, model_file, device,
     input_channel_select=None,
     viz_mode="global", viz_stretch=(5,95), blur_sigma=None,
-    random_k=150, rng_seed=123
+    random_k=150, rng_seed=123, state=None
 ):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -179,7 +204,7 @@ def infer_from_numpy(
 
     N, H, W, Cin = X.shape
     Cout = 13
-    model = load_model(model_dir, model_file, Cin, Cout, H, device)
+    model = load_model(model_dir, model_file, Cin, Cout, H, device, state=state)
 
     # ----- Choose random subset of indices -----
     rng = random.Random(rng_seed)
@@ -215,17 +240,24 @@ def infer_from_numpy(
         vhP.save(os.path.join(out_dir, base + "_sar_vh.png"))
         psP.save(os.path.join(out_dir, base + "_sar_pseudo.png"))
 
+        # Ground-truth clean, inverted first so it can supply the stretch for the prediction
+        y_true_orig_i = None
+        if y_true_scaled is not None:
+            y_true_orig_i = inverse_from_tanh_using_clip(y_true_scaled[idx], s2_clip)
+
         # Predicted clean (inverse to original units) → RGB
         y_pred_orig = inverse_from_tanh_using_clip(y_pred_scaled, s2_clip)
         pred_rgb = rgb_from_s2(
             y_pred_orig,
             mode=("stretch" if viz_mode=="stretch" else "global"),
             percentiles=viz_stretch,
-            blur_sigma=blur_sigma
+            blur_sigma=blur_sigma,
+            ref=y_true_orig_i,
         )
         pred_rgb.save(os.path.join(out_dir, base + "_pred_rgb.png"))
 
-        # Cloudy optical panel (if available)
+        # Cloudy optical panel (if available). Kept on its own stretch: clouds are far
+        # brighter than the clean scene, so the clean stretch would blow the panel out.
         cloudy_rgb = None
         if y_cloudy_scaled is not None:
             y_cloudy_orig = inverse_from_tanh_using_clip(y_cloudy_scaled[idx], s2_clip)
@@ -237,10 +269,8 @@ def infer_from_numpy(
             )
             cloudy_rgb.save(os.path.join(out_dir, base + "_cloudy_rgb.png"))
 
-        # Ground-truth clean (if available)
         true_rgb = None
-        if y_true_scaled is not None:
-            y_true_orig_i = inverse_from_tanh_using_clip(y_true_scaled[idx], s2_clip)
+        if y_true_orig_i is not None:
             true_rgb = rgb_from_s2(
                 y_true_orig_i,
                 mode=("stretch" if viz_mode=="stretch" else "global"),
@@ -266,7 +296,9 @@ def main():
     ap = argparse.ArgumentParser(description="Generate optical (S2) from preprocessed arrays; save SAR/Cloudy/Pred/GT panels.")
     ap.add_argument("--data_dir", default=DEFAULT_DATA_DIR, help="root of preprocessed arrays (X_test.npy, y_test.npy, y_cloudy_test.npy)")
     ap.add_argument("--model_dir", default=DEFAULT_MODEL_DIR, help="dir containing the trained netG")
-    ap.add_argument("--model_file", default=DEFAULT_MODEL_FILE, help="generator weights file name")
+    ap.add_argument("--model_file", default=DEFAULT_MODEL_FILE, help="explicit generator weights file; overrides --checkpoints")
+    ap.add_argument("--checkpoints", nargs="+", default=DEFAULT_CHECKPOINTS, choices=["best", "last"],
+                    help="which checkpoints to generate from; each goes to out_dir/<label>")
     ap.add_argument("--out_dir", default=DEFAULT_RESULTS_DIR, help="where to write outputs")
     ap.add_argument("--gpu", type=int, default=0, help="CUDA device index")
     ap.add_argument("--input_channel_select", type=int, default=None,
@@ -288,19 +320,35 @@ def main():
     else:
         device = torch.device("cpu")
 
-    infer_from_numpy(
-        data_dir=args.data_dir,
-        out_dir=args.out_dir,
-        model_dir=args.model_dir,
-        model_file=args.model_file,
-        device=device,
-        input_channel_select=args.input_channel_select,
-        viz_mode=args.viz_mode,
-        viz_stretch=tuple(args.viz_stretch),
-        blur_sigma=args.blur,
-        random_k=args.random_k,
-        rng_seed=args.rng_seed,
-    )
+    if args.model_file:
+        runs = [(Path(args.model_file).stem, args.model_file, None)]
+    else:
+        runs = []
+        for which in args.checkpoints:
+            r = resolve_generator(args.model_dir, which, device=device)
+            if r is None:
+                print(f"[WARN] no '{which}' checkpoint in {args.model_dir}; skipping")
+                continue
+            runs.append(r)
+        if not runs:
+            raise FileNotFoundError(f"no usable checkpoint in {args.model_dir}")
+
+    for label, src, state in runs:
+        print(f"[INFO] generating from {label}: {src}")
+        infer_from_numpy(
+            data_dir=args.data_dir,
+            out_dir=os.path.join(args.out_dir, label),
+            model_dir=args.model_dir,
+            model_file=src,
+            state=state,
+            device=device,
+            input_channel_select=args.input_channel_select,
+            viz_mode=args.viz_mode,
+            viz_stretch=tuple(args.viz_stretch),
+            blur_sigma=args.blur,
+            random_k=args.random_k,
+            rng_seed=args.rng_seed,
+        )
 
 if __name__ == "__main__":
     main()

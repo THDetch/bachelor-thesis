@@ -13,7 +13,7 @@ ARMS = ["A_base", "A0", "A1", "A2", "A3", "A3-g3", "A3-g10", "L1-only"]
 REFERENCE_RUN = "trained_baseline_scenesplit_sn/pix2pix/history.csv"
 
 WINDOW = (11, 20)        # S1, S2
-LATE = (18, 20)          # S3 numerator, T, F, C
+LATE = (18, 20)          # S3 numerator, T, F, C, M
 EARLY = (9, 11)          # S3 denominator
 FIRST = (1, 3)           # baseline for the D(real) growth trigger
 S1_D_OUT_FAKE = 0.10
@@ -22,7 +22,11 @@ S2_G_GAN = 0.90
 S3_RATIO = 0.50
 T_OVER_BASE = 0.05
 F_TOLERANCE = 1.10
-C_DEG = 0.10
+
+# lambda_GAN = 0, so D never reaches G: its stability numbers describe a generator it
+# did not shape. Reported, not scored. See the 2026-11-14 amendment.
+OBSERVER_ARMS = {"L1-only"}
+OBSERVER_IDS = ("S1", "S2", "S3", "M", "C")
 
 
 def load(path):
@@ -72,28 +76,41 @@ def hf_corr(armname, rows):
     return None, " (not measured)"
 
 
-def pooled_deg_shuffle(files, n_boot=1000, seed=12345, alpha=0.05):
-    """deg_shuffle from per-patch scores pooled across epochs, then bootstrapped.
+def pooled_margin(files, pos, neg, n_boot=1000, seed=12345, alpha=0.05):
+    """Raw mean(pos) - mean(neg) from per-patch scores pooled across epochs.
 
     Pooling before the bootstrap, rather than averaging per-epoch point estimates,
-    keeps the interval honest about how much data it rests on.
+    keeps the interval honest about how much data it rests on. Patches are resampled
+    jointly so each draw keeps the pairing between the three scores.
     """
     z = [np.load(p) for p in files]
-    d_real = np.concatenate([a["d_real"] for a in z])
-    d_fake = np.concatenate([a["d_fake"] for a in z])
-    d_shuf = np.concatenate([a["d_shuf"] for a in z])
+    a = np.concatenate([x[pos] for x in z])
+    b = np.concatenate([x[neg] for x in z])
 
     rng = np.random.default_rng(seed)
-    n = len(d_real)
+    n = len(a)
     draws = np.empty(n_boot)
     for i in range(n_boot):
         s = rng.integers(0, n, n)
-        lo, hi = d_fake[s].mean(), d_real[s].mean()
-        draws[i] = 1.0 - (d_shuf[s].mean() - lo) / (hi - lo)
+        draws[i] = a[s].mean() - b[s].mean()
 
-    deg = 1.0 - (d_shuf.mean() - d_fake.mean()) / (d_real.mean() - d_fake.mean())
-    return float(deg), float(np.percentile(draws, 100 * alpha / 2)), \
+    return float(a.mean() - b.mean()), \
+        float(np.percentile(draws, 100 * alpha / 2)), \
         float(np.percentile(draws, 100 * (1 - alpha / 2)))
+
+
+def pooled_auc(files, pos, neg):
+    """Rank form of the same comparison, invariant to D's output scale.
+
+    Reported only. The raw margin is what C and M are scored on; this column exists
+    because the two can disagree when D's output spread differs between arms.
+    """
+    z = [np.load(p) for p in files]
+    a = np.concatenate([x[pos] for x in z])
+    b = np.concatenate([x[neg] for x in z])
+    r = np.argsort(np.argsort(np.concatenate([a, b]))) + 1.0
+    n1 = len(a)
+    return float((r[:n1].sum() - n1 * (n1 + 1) / 2) / (n1 * len(b)))
 
 
 def verdict(ok):
@@ -125,16 +142,19 @@ def evaluate(armname, rows, base, is_reference=False):
 
     hf = window_mean(rows, "probe_hf_ratio", LATE)
     hf_base = window_mean(base, "probe_hf_ratio", LATE) if base else None
+    hf10 = window_mean(rows, "probe_hf_ratio_10m", LATE)
+    hf10_note = (", 10m n/a" if hf10 is None else f", 10m {round(hf10, 4)}")
     l1 = window_mean(rows, "val_L1", LATE)
     l1_base = window_mean(base, "val_L1", LATE) if base else None
 
     # T and F are defined relative to A_base, so the reference arm only supplies them.
     if is_reference:
-        out["T"] = (None, f"HF {hf if hf is None else round(hf, 4)} (reference value)")
+        out["T"] = (None, f"HF {hf if hf is None else round(hf, 4)}{hf10_note} "
+                          f"(reference value)")
         out["F"] = (None, f"val_L1 {l1 if l1 is None else round(l1, 5)} (reference value)")
     else:
         out["T"] = (hf is not None and hf_base is not None and hf >= hf_base + T_OVER_BASE,
-                    f"HF {hf if hf is None else round(hf, 4)}"
+                    f"HF {hf if hf is None else round(hf, 4)}{hf10_note}"
                     + (f", needs >= {round(hf_base + T_OVER_BASE, 4)}" if hf_base else ""))
         out["F"] = (l1 is not None and (l1_base is None or l1 <= F_TOLERANCE * l1_base),
                     f"val_L1 {l1 if l1 is None else round(l1, 5)}"
@@ -142,18 +162,20 @@ def evaluate(armname, rows, base, is_reference=False):
 
     files = score_files(armname)
     if files:
-        deg, lo, _ = pooled_deg_shuffle(files)
-        note = f"deg_shuffle {round(deg, 4)}, CI low {round(lo, 4)} (pooled {len(files)} ep)"
+        for cid, neg, label in (("M", "d_fake", "D(real)-D(fake)"),
+                                ("C", "d_shuf", "D(real)-D(shuf)")):
+            v, lo, _ = pooled_margin(files, "d_real", neg)
+            auc = pooled_auc(files, "d_real", neg)
+            out[cid] = (lo > 0, f"{label} {round(v, 4)}, CI low {round(lo, 4)} "
+                                f"(pooled {len(files)} ep)  [AUC {auc:.3f}, reported]")
         out["_c_estimator"] = "pooled"
     else:
-        # Runs from before per-patch scores were persisted fall back to the epoch means.
-        deg = window_mean(rows, "probe_deg_shuffle", LATE)
-        lo = window_mean(rows, "probe_deg_shuffle_lo", LATE)
-        note = (f"deg_shuffle {deg if deg is None else round(deg, 4)}, "
-                f"CI low {lo if lo is None else round(lo, 4)} "
-                f"(per-epoch mean, NO per-patch scores)")
-        out["_c_estimator"] = "per-epoch"
-    out["C"] = (deg is not None and lo is not None and deg >= C_DEG and lo > 0, note)
+        # Runs from before per-patch scores were persisted cannot supply either margin:
+        # the old history columns held the normalized form, which is not recoverable.
+        for cid, label in (("M", "D(real)-D(fake)"), ("C", "D(real)-D(shuf)")):
+            out[cid] = (None, f"{label} not available (NO per-patch scores; "
+                              f"run backfill_probe.py for epochs 18-20)")
+        out["_c_estimator"] = "missing"
 
     corr, corr_note = hf_corr(armname, rows)
     grad = window_mean(rows, "train_gan_l1_grad_ratio_param", LATE)
@@ -170,6 +192,11 @@ def evaluate(armname, rows, base, is_reference=False):
         growth = 100 * (late_r - early_r) / early_r
         flag = "  <- too weak, retry lr_D 1e-4" if growth < 10 else ""
         out[" "] = (None, f"D(real) growth {growth:+.1f}%{flag}  [reported]")
+
+    if armname in OBSERVER_ARMS:
+        for cid in OBSERVER_IDS:
+            if cid in out:
+                out[cid] = (None, out[cid][1] + "  [observer D, not scored]")
 
     return out
 
@@ -198,9 +225,9 @@ def main():
 
     used = {v for v in estimators.values() if v}
     if len(used) > 1:
-        odd = [k for k, v in estimators.items() if v == "per-epoch"]
-        print(f"\n[WARN] C is not estimated the same way in every arm: {', '.join(odd)} "
-              f"lack per-patch scores. Rerun them, or read C as indicative there.")
+        odd = [k for k, v in estimators.items() if v == "missing"]
+        print(f"\n[WARN] M and C need per-patch scores at epochs 18-20, which "
+              f"{', '.join(odd)} lack. Run backfill_probe.py for those epochs.")
 
     if base is not None:
         ref = load(REFERENCE_RUN)

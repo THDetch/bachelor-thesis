@@ -17,13 +17,18 @@ else:
     print(f"[WARN] pix2pix repo not found at {gan_repo_path}; assuming wrapper is importable.")
 
 from mymodels.cp2pwrapper import Pix2PixWrapper  # must exist
+from checkpoint_select import resolve_generator
 
 
 # ---------- Defaults ----------
 DEFAULT_DATA_DIR = "dataset_winter_all"
 DEFAULT_RESULTS_DIR = "trained-full-copy/generated_bands"
 DEFAULT_MODEL_DIR = "trained-full-copy/pix2pix"
-DEFAULT_MODEL_FILE = "pix2pix_best_netG.pth"
+DEFAULT_MODEL_FILE = None  # None -> resolve DEFAULT_CHECKPOINTS instead
+
+# "best" is best-by-val-L1, "last" is the final epoch. Different epochs, and selecting
+# on L1 favours the blurriest one, so both are generated into separate subdirectories.
+DEFAULT_CHECKPOINTS = ["best", "last"]
 
 
 # ---------- S2 inverse using clip JSON ----------
@@ -140,16 +145,17 @@ def concat_h(imgs, pad=4, pad_color=220):
 
 
 # ---------- Model loader ----------
-def load_model(model_dir, model_file, in_ch, out_ch, img_size, device):
-    mp = Path(model_dir) / model_file
-    if not mp.exists():
-        raise FileNotFoundError(f"Model not found: {mp}")
+def load_model(model_dir, model_file, in_ch, out_ch, img_size, device, state=None):
     model = Pix2PixWrapper(in_channels=in_ch, out_channels=out_ch, img_size=img_size)
-    # safer load (PyTorch >= 2.4); if your torch is older, drop weights_only
-    try:
-        state = torch.load(str(mp), map_location=device, weights_only=True)
-    except TypeError:
-        state = torch.load(str(mp), map_location=device)
+    if state is None:
+        mp = Path(model_dir) / model_file
+        if not mp.exists():
+            raise FileNotFoundError(f"Model not found: {mp}")
+        # safer load (PyTorch >= 2.4); if your torch is older, drop weights_only
+        try:
+            state = torch.load(str(mp), map_location=device, weights_only=True)
+        except TypeError:
+            state = torch.load(str(mp), map_location=device)
     model.load_state_dict(state)
     model = model.to(device)
     model.eval()
@@ -160,7 +166,7 @@ def load_model(model_dir, model_file, in_ch, out_ch, img_size, device):
 def infer_from_numpy(
     data_dir, out_dir, model_dir, model_file, device,
     limit=None, offset=0, input_channel_select=None,
-    save_true=True, viz_mode="stretch", viz_stretch=(2,98), viz_gamma=None, blur_sigma=None
+    save_true=True, viz_mode="stretch", viz_stretch=(2,98), viz_gamma=None, blur_sigma=None, state=None
 ):
     """
     Exports per-band grayscale images:
@@ -193,7 +199,7 @@ def infer_from_numpy(
 
     N, H, W, Cin = X.shape
     Cout = 13
-    model = load_model(model_dir, model_file, Cin, Cout, H, device)
+    model = load_model(model_dir, model_file, Cin, Cout, H, device, state=state)
 
     # Subset selection
     if offset < 0: offset = 0
@@ -275,7 +281,9 @@ def main():
     )
     ap.add_argument("--data_dir", default=DEFAULT_DATA_DIR, help="root of preprocessed arrays (X_test.npy, y_test.npy, S2_clip.json)")
     ap.add_argument("--model_dir", default=DEFAULT_MODEL_DIR, help="dir containing the trained netG")
-    ap.add_argument("--model_file", default=DEFAULT_MODEL_FILE, help="generator weights file name")
+    ap.add_argument("--model_file", default=DEFAULT_MODEL_FILE, help="explicit generator weights file; overrides --checkpoints")
+    ap.add_argument("--checkpoints", nargs="+", default=DEFAULT_CHECKPOINTS, choices=["best", "last"],
+                    help="which checkpoints to generate from; each goes to out_dir/<label>")
     ap.add_argument("--out_dir", default=DEFAULT_RESULTS_DIR, help="where to write outputs")
     ap.add_argument("--gpu", type=int, default=0, help="CUDA device index")
     ap.add_argument("--limit", type=int, default=100, help="max number of samples")
@@ -299,21 +307,37 @@ def main():
     else:
         device = torch.device("cpu")
 
-    infer_from_numpy(
-        data_dir=args.data_dir,
-        out_dir=args.out_dir,
-        model_dir=args.model_dir,
-        model_file=args.model_file,
-        device=device,
-        limit=args.limit,
-        offset=args.offset,
-        input_channel_select=args.input_channel_select,
-        save_true=(not args.no_true),
-        viz_mode=args.viz_mode,
-        viz_stretch=tuple(args.viz_stretch),
-        viz_gamma=args.viz_gamma,
-        blur_sigma=args.blur,
-    )
+    if args.model_file:
+        runs = [(Path(args.model_file).stem, args.model_file, None)]
+    else:
+        runs = []
+        for which in args.checkpoints:
+            r = resolve_generator(args.model_dir, which, device=device)
+            if r is None:
+                print(f"[WARN] no '{which}' checkpoint in {args.model_dir}; skipping")
+                continue
+            runs.append(r)
+        if not runs:
+            raise FileNotFoundError(f"no usable checkpoint in {args.model_dir}")
+
+    for label, src, state in runs:
+        print(f"[INFO] generating from {label}: {src}")
+        infer_from_numpy(
+            data_dir=args.data_dir,
+            out_dir=os.path.join(args.out_dir, label),
+            model_dir=args.model_dir,
+            model_file=src,
+            state=state,
+            device=device,
+            limit=args.limit,
+            offset=args.offset,
+            input_channel_select=args.input_channel_select,
+            save_true=(not args.no_true),
+            viz_mode=args.viz_mode,
+            viz_stretch=tuple(args.viz_stretch),
+            viz_gamma=args.viz_gamma,
+            blur_sigma=args.blur,
+        )
 
 if __name__ == "__main__":
     main()

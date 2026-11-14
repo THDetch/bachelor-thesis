@@ -96,7 +96,7 @@ ARM_CONFIG = {
     "L1-only": dict(strip_norm=True,  mismatch=True,  lambda_GAN=0.0),
 }
 
-arm = "A3-g10"
+arm = "L1-only"
 
 strip_norm_from_D = ARM_CONFIG[arm]["strip_norm"]
 use_mismatch = ARM_CONFIG[arm]["mismatch"]
@@ -544,11 +544,16 @@ history = {
     "probe_D_out_real": [],
     "probe_D_out_fake": [],
     "probe_hf_ratio": [],
+    "probe_hf_ratio_10m": [],
     "probe_hf_corr": [],
+    "probe_hf_corr_10m": [],
     "probe_std_ratio": [],
-    "probe_deg_shuffle": [],
-    "probe_deg_shuffle_lo": [],
-    "probe_deg_shuffle_hi": [],
+    "probe_margin_real_fake": [],
+    "probe_margin_real_fake_lo": [],
+    "probe_margin_real_fake_hi": [],
+    "probe_margin_real_shuf": [],
+    "probe_margin_real_shuf_lo": [],
+    "probe_margin_real_shuf_hi": [],
 
     # Validation
     "val_L1": [],
@@ -832,12 +837,16 @@ def save_detailed_training_plots():
         x,
         [
             history["probe_hf_ratio"],
+            history["probe_hf_ratio_10m"],
             history["probe_hf_corr"],
+            history["probe_hf_corr_10m"],
             history["probe_std_ratio"],
         ],
         [
             "land-band HF std ratio",
+            "native 10 m HF std ratio",
             "land-band HF correlation",
+            "native 10 m HF correlation",
             "within-patch std ratio",
         ],
         "Generator Detail vs Target (128 fixed val patches)",
@@ -848,18 +857,24 @@ def save_detailed_training_plots():
     plot_curve(
         x,
         [
-            history["probe_deg_shuffle"],
-            history["probe_deg_shuffle_lo"],
-            history["probe_deg_shuffle_hi"],
+            history["probe_margin_real_shuf"],
+            history["probe_margin_real_shuf_lo"],
+            history["probe_margin_real_shuf_hi"],
+            history["probe_margin_real_fake"],
+            history["probe_margin_real_fake_lo"],
+            history["probe_margin_real_fake_hi"],
         ],
         [
-            "deg_shuffle",
-            "95% CI low",
-            "95% CI high",
+            "C: D(real) - D(shuffled SAR)",
+            "C 95% CI low",
+            "C 95% CI high",
+            "M: D(real) - D(fake)",
+            "M 95% CI low",
+            "M 95% CI high",
         ],
-        "Does D Use the SAR Condition? (0 = ignores it)",
-        "degradation toward fake",
-        "probe_deg_shuffle.png",
+        "Discriminator Margins on Held-Out Patches (0 = no separation)",
+        "D output difference",
+        "probe_margins.png",
     )
 
     plot_curve(
@@ -1475,11 +1490,15 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     summary += (
         f" | probe D(f): {probe_metrics['probe_D_out_fake']:.4f}"
         f" | HF: {probe_metrics['probe_hf_ratio']:.4f}"
+        f" | HF10m: {probe_metrics['probe_hf_ratio_10m']:.4f}"
         f" | HFcorr: {probe_metrics['probe_hf_corr']:.4f}"
         f" | std: {probe_metrics['probe_std_ratio']:.4f}"
-        f" | deg_shuffle: {probe_metrics['probe_deg_shuffle']:.4f}"
-        f" [{probe_metrics['probe_deg_shuffle_lo']:.4f},"
-        f"{probe_metrics['probe_deg_shuffle_hi']:.4f}]"
+        f" | M: {probe_metrics['probe_margin_real_fake']:.4f}"
+        f" [{probe_metrics['probe_margin_real_fake_lo']:.4f},"
+        f"{probe_metrics['probe_margin_real_fake_hi']:.4f}]"
+        f" | C: {probe_metrics['probe_margin_real_shuf']:.4f}"
+        f" [{probe_metrics['probe_margin_real_shuf_lo']:.4f},"
+        f"{probe_metrics['probe_margin_real_shuf_hi']:.4f}]"
     )
 
     if use_mismatch:
@@ -1570,7 +1589,11 @@ for epoch in tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", pos
     save_history_json()
     save_detailed_training_plots()
 
-    if (epoch + 1) >= early_abort_epoch and train_D_out_fake < early_abort_d_out_fake:
+    # An observer D is expected to win outright: G gets no adversarial gradient, so it
+    # never learns to fool it. Aborting there would truncate the 18-20 metric window.
+    if (lambda_GAN > 0
+            and (epoch + 1) >= early_abort_epoch
+            and train_D_out_fake < early_abort_d_out_fake):
         msg = (f"[ABORT] arm {arm}: D_out_fake {train_D_out_fake:.5f} < "
                f"{early_abort_d_out_fake} at epoch {epoch + 1}; this arm has failed.")
         tqdm.write(msg)

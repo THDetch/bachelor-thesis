@@ -25,6 +25,10 @@ CI_ALPHA = 0.05
 # VIS B2-B4, RE B5-B7, NIR B8/B8A, SWIR B11/B12. Excludes the 60 m bands.
 LAND_BANDS = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]
 
+# B2, B3, B4, B8 are the only bands natively sampled at 10 m; the rest are upsampled
+# from 20 m and cannot carry real detail at the scale T is trying to measure.
+NATIVE_10M_BANDS = [1, 2, 3, 7]
+
 
 def _gaussian_kernel1d(sigma, device):
     radius = max(1, int(np.ceil(3.0 * sigma)))
@@ -100,14 +104,14 @@ def load_probe(data_dir, split="val", n=PROBE_N, channel_select=None):
     }
 
 
-def _bootstrap_deg(d_real, d_fake, d_shuf, n_boot=N_BOOT, seed=BOOT_SEED, alpha=CI_ALPHA):
+def bootstrap_margin(pos, neg, n_boot=N_BOOT, seed=BOOT_SEED, alpha=CI_ALPHA):
+    """CI for mean(pos) - mean(neg), resampling patches jointly so the pairing holds."""
     rng = np.random.default_rng(seed)
-    n = len(d_real)
+    n = len(pos)
     draws = np.empty(n_boot)
     for i in range(n_boot):
         s = rng.integers(0, n, n)
-        lo, hi = d_fake[s].mean(), d_real[s].mean()
-        draws[i] = 1.0 - (d_shuf[s].mean() - lo) / (hi - lo)
+        draws[i] = pos[s].mean() - neg[s].mean()
     return (float(np.percentile(draws, 100 * alpha / 2)),
             float(np.percentile(draws, 100 * (1 - alpha / 2))))
 
@@ -167,19 +171,30 @@ def run_probe(netG, netD, probe, device, batch=16, d_noise=None):
         sd = np.concatenate(sd_num) / (np.concatenate(sd_den) + 1e-12)
         corr = np.concatenate(hf_corr)
         land = [b for b in LAND_BANDS if b < hf.shape[1]]
+        native = [b for b in NATIVE_10M_BANDS if b < hf.shape[1]]
 
-        deg = 1.0 - (d_shuf.mean() - d_fake.mean()) / (d_real.mean() - d_fake.mean())
-        ci_lo, ci_hi = _bootstrap_deg(d_real, d_fake, d_shuf)
+        # Raw margins, not the old normalized deg_shuffle: dividing by the real/fake
+        # margin diverges once that margin reaches zero (A3-g10). See the 2026-11-14
+        # amendment in success_criteria.md.
+        m = d_real.mean() - d_fake.mean()
+        m_lo, m_hi = bootstrap_margin(d_real, d_fake)
+        c = d_real.mean() - d_shuf.mean()
+        c_lo, c_hi = bootstrap_margin(d_real, d_shuf)
 
         return {
             "probe_D_out_real": float(d_real.mean()),
             "probe_D_out_fake": float(d_fake.mean()),
             "probe_hf_ratio": float(hf[:, land].mean()),
+            "probe_hf_ratio_10m": float(hf[:, native].mean()),
             "probe_hf_corr": float(corr[:, land].mean()),
+            "probe_hf_corr_10m": float(corr[:, native].mean()),
             "probe_std_ratio": float(sd[:, land].mean()),
-            "probe_deg_shuffle": float(deg),
-            "probe_deg_shuffle_lo": ci_lo,
-            "probe_deg_shuffle_hi": ci_hi,
+            "probe_margin_real_fake": float(m),
+            "probe_margin_real_fake_lo": m_lo,
+            "probe_margin_real_fake_hi": m_hi,
+            "probe_margin_real_shuf": float(c),
+            "probe_margin_real_shuf_lo": c_lo,
+            "probe_margin_real_shuf_hi": c_hi,
         }, {"d_real": d_real, "d_fake": d_fake, "d_shuf": d_shuf}
     finally:
         netG.train(modes[0])

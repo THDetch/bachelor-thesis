@@ -27,6 +27,10 @@ MODEL_DIR = f"trained_{RUN_NAME}"
 DATA_DIR = "dataset_all_seasons_scenesplit"
 RESULTS_DIR = f"{MODEL_DIR}/evaluation"
 
+# "best" is best-by-val-L1, "last" is the final epoch. They are different epochs and
+# selecting on L1 favours the blurriest one, so both are evaluated and tagged.
+CHECKPOINTS = ["best", "last"]
+
 # Must match norm_G in the training script, or load_state_dict will fail.
 NORM_G = "batch"
 
@@ -76,6 +80,7 @@ else:
 # Model imports (pix2pix)
 # ----------------------
 from mymodels.cp2pwrapper import Pix2PixWrapper  # must exist
+from checkpoint_select import resolve_generator
 
 # ----------------------
 # Optional LPIPS
@@ -371,7 +376,6 @@ def main():
             'model_class': Pix2PixWrapper,
             'model_name': 'pix2pix',
             'params': {'in_channels': C_in, 'out_channels': C_out, 'img_size': H, 'norm': NORM_G},
-            'model_file': 'pix2pix_best_netG.pth'
         }
     ]
     models_to_evaluate = [m for m in all_models if m['model_name'] in models_to_run]
@@ -392,34 +396,28 @@ def main():
     else:
         logging.warning("lpips package not found; install with `pip install lpips` to enable LPIPS metric.")
 
-    for model_config in models_to_evaluate:
+    for model_config, which in [(m, w) for m in models_to_evaluate for w in CHECKPOINTS]:
         model_name = model_config['model_name']
         model_class = model_config['model_class']
         params = model_config['params']
         trained_model_dir = os.path.join(MODEL_DIR, model_name)
-        model_path = os.path.join(trained_model_dir, model_config['model_file'])
 
-        if not os.path.exists(model_path):
-            logging.warning(f"Model '{model_name}' not found at {model_path}. Skipping.")
+        resolved = resolve_generator(trained_model_dir, which, model_name, device)
+        if resolved is None:
+            logging.warning(f"Model '{model_name}' has no '{which}' checkpoint in "
+                            f"{trained_model_dir}. Skipping.")
             continue
+        ckpt_label, model_path, state = resolved
 
         # Load model
-        logging.info(f"Loading model: {model_name} from {model_path}")
+        logging.info(f"Loading model: {model_name} [{ckpt_label}] from {model_path}")
         model = model_class(**params)
-        # state = torch.load(model_path, map_location=device, weights_only=True)
-        # model.load_state_dict(state)
-
-        state = None
-        try:
-            state = torch.load(model_path, map_location=device, weights_only=True)
-        except TypeError:
-            state = torch.load(model_path, map_location=device)
         model.load_state_dict(state)
 
         model = model.to(device)
         model.eval()
 
-        logging.info(f"--- Evaluating {model_name} (streaming) ---")
+        logging.info(f"--- Evaluating {model_name} [{ckpt_label}] (streaming) ---")
 
         # ----- First pass: accumulate sums, mins/maxes, LPIPS, SAM -----
         # Per-channel sums for original-units errors
@@ -605,20 +603,20 @@ def main():
 
         # ---------------- Save CSV -----------------------------------------
         overall_headers = [
-            "model","MAE","RMSE","PSNR","SSIM",
+            "model","checkpoint","MAE","RMSE","PSNR","SSIM",
             "MAE_norm","RMSE_norm",
             "LPIPS_RGB",
             "SAM_mean_deg","SAM_median_deg","SAM_p25_deg","SAM_p75_deg"
         ] + sorted(group_summary.keys())
 
         overall_row = [
-            model_name, mae_all, rmse_all, psnr_all, ssim_all,
+            model_name, ckpt_label, mae_all, rmse_all, psnr_all, ssim_all,
             mae_norm, rmse_norm,
             (lpips_rgb_mean if lpips_rgb_mean is not None else ""),
             sam_stats["SAM_mean_deg"], sam_stats["SAM_median_deg"], sam_stats["SAM_p25_deg"], sam_stats["SAM_p75_deg"]
         ] + [group_summary[k] for k in sorted(group_summary.keys())]
         # --- Log per-band metrics (original units) ---
-        logging.info("Per-band (original units):")
+        logging.info(f"Per-band (original units) [{ckpt_label}]:")
         for c, name in enumerate(BAND_NAMES):
             logging.info(
                 f"  {name:>4} | MAE {mae_c[c]:8.3f} | RMSE {rmse_per[c]:8.3f} | "
@@ -646,7 +644,7 @@ def main():
             w.writerow(overall_row)
 
         # Per-band CSV
-        perband_headers = ["model","band","MAE","RMSE","NRMSE","R2","PSNR","SSIM","MAE_norm","RMSE_norm"]
+        perband_headers = ["model","checkpoint","band","MAE","RMSE","NRMSE","R2","PSNR","SSIM","MAE_norm","RMSE_norm"]
         write_header_band = not os.path.exists(perband_csv)
         with open(perband_csv, "a", newline="") as f:
             w = csv.writer(f)
@@ -654,7 +652,7 @@ def main():
                 w.writerow(perband_headers)
             for c, name in enumerate(BAND_NAMES):
                 w.writerow([
-                    model_name, name,
+                    model_name, ckpt_label, name,
                     float(mae_c[c]), float(rmse_per[c]), float(nrmse_per[c]), float(r2_per[c]),
                     float(psnr_per[c]), float(ssim_per[c]),
                     float(mae_norm_per[c]), float(rmse_norm_per[c])
