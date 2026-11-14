@@ -10,5 +10,46 @@
   "probe_hf_ratio": 0.72499680519104,
   "probe_hf_ratio_10m": 0.6785851716995239,
   "probe_hf_corr_10m": 0.020584627985954285,
+  "probe_bp_ratio_10m": 1.1946020126342773,
+  "probe_bp_corr_10m": 0.1480846405029297,
+  "probe_bp_corr": 0.15629339218139648,
+  "per_epoch": {
+    "5": {
+      "probe_hf_corr": 0.029586877673864365,
+      "probe_hf_ratio": 0.4095821976661682,
+      "probe_hf_ratio_10m": 0.3355129361152649,
+      "probe_hf_corr_10m": 0.02424357458949089,
+      "probe_bp_ratio_10m": 1.1353332996368408,
+      "probe_bp_corr_10m": 0.15248413383960724,
+      "probe_bp_corr": 0.15319029986858368
+    },
+    "10": {
+      "probe_hf_corr": 0.02054995857179165,
+      "probe_hf_ratio": 0.5235203504562378,
+      "probe_hf_ratio_10m": 0.4671500623226166,
+      "probe_hf_corr_10m": 0.018427573144435883,
+      "probe_bp_ratio_10m": 1.1385440826416016,
+      "probe_bp_corr_10m": 0.14371296763420105,
+      "probe_bp_corr": 0.15040071308612823
+    },
+    "15": {
+      "probe_hf_corr": 0.028589755296707153,
+      "probe_hf_ratio": 0.5332022905349731,
+      "probe_hf_ratio_10m": 0.4923705458641052,
+      "probe_hf_corr_10m": 0.028192132711410522,
+      "probe_bp_ratio_10m": 1.1382710933685303,
+      "probe_bp_corr_10m": 0.15980952978134155,
+      "probe_bp_corr": 0.1544874608516693
+    },
+    "20": {
+      "probe_hf_corr": 0.022570492699742317,
+      "probe_hf_ratio": 0.72499680519104,
+      "probe_hf_ratio_10m": 0.6785851716995239,
+      "probe_hf_corr_10m": 0.020584627985954285,
+      "probe_bp_ratio_10m": 1.1946020126342773,
+      "probe_bp_corr_10m": 0.1480846405029297,
+      "probe_bp_corr": 0.15629339218139648
+    }
+  },
   "note": "recomputed from epoch snapshots; single epoch, not the 18-20 window used elsewhere"
 }

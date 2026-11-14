@@ -1,0 +1,55 @@
+{
+  "epochs": [
+    5,
+    10,
+    15,
+    20
+  ],
+  "reference_epoch": 20,
+  "probe_hf_corr": 0.04606374353170395,
+  "probe_hf_ratio": 0.15174885094165802,
+  "probe_hf_ratio_10m": 0.14155524969100952,
+  "probe_hf_corr_10m": 0.042267024517059326,
+  "probe_bp_ratio_10m": 0.4929381012916565,
+  "probe_bp_corr_10m": 0.18212676048278809,
+  "probe_bp_corr": 0.1852966547012329,
+  "per_epoch": {
+    "5": {
+      "probe_hf_corr": 0.03692132607102394,
+      "probe_hf_ratio": 0.17432859539985657,
+      "probe_hf_ratio_10m": 0.1582794487476349,
+      "probe_hf_corr_10m": 0.0326484739780426,
+      "probe_bp_ratio_10m": 0.6543653011322021,
+      "probe_bp_corr_10m": 0.15300524234771729,
+      "probe_bp_corr": 0.15083949267864227
+    },
+    "10": {
+      "probe_hf_corr": 0.03927652910351753,
+      "probe_hf_ratio": 0.16640028357505798,
+      "probe_hf_ratio_10m": 0.15267178416252136,
+      "probe_hf_corr_10m": 0.036195576190948486,
+      "probe_bp_ratio_10m": 0.5714905261993408,
+      "probe_bp_corr_10m": 0.16945305466651917,
+      "probe_bp_corr": 0.16209295392036438
+    },
+    "15": {
+      "probe_hf_corr": 0.04281551390886307,
+      "probe_hf_ratio": 0.16251890361309052,
+      "probe_hf_ratio_10m": 0.14827260375022888,
+      "probe_hf_corr_10m": 0.0401432178914547,
+      "probe_bp_ratio_10m": 0.549670934677124,
+      "probe_bp_corr_10m": 0.17157715559005737,
+      "probe_bp_corr": 0.1669882833957672
+    },
+    "20": {
+      "probe_hf_corr": 0.04606374353170395,
+      "probe_hf_ratio": 0.15174885094165802,
+      "probe_hf_ratio_10m": 0.14155524969100952,
+      "probe_hf_corr_10m": 0.042267024517059326,
+      "probe_bp_ratio_10m": 0.4929381012916565,
+      "probe_bp_corr_10m": 0.18212676048278809,
+      "probe_bp_corr": 0.1852966547012329
+    }
+  },
+  "note": "recomputed from epoch snapshots; single epoch, not the 18-20 window used elsewhere"
+}
