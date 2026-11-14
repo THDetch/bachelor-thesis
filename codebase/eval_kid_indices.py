@@ -1,8 +1,9 @@
 """KID and spectral-index metrics on the full validation split, per arm.
 
 Frozen spec: see the 2026-11-14 (third) amendment in success_criteria.md. Nothing here
-is tunable after the fact - the stretch windows come from the training split via
-make_kid_stretch.py, and the band triples, resize and water threshold are fixed below.
+is tunable after the fact - the stretch windows are the training-split p2-p98 already
+recorded in saturation_train_25697.json, and the band triples, resize and water
+threshold are fixed below.
 
     python eval_kid_indices.py
 """
@@ -31,6 +32,11 @@ EPOCH = 20
 BATCH = 32
 GPU_ID = 0
 
+# Training-split p2-p98 per band, the same frozen file that set the figure windows.
+# Never regenerate these from validation or test data.
+STRETCH_FILE = "saturation_train_25697.json"
+STRETCH_PCT = ("p2", "p98")
+
 ARMS = ["A_base", "A0", "A1", "A3", "A3-g3", "A3-g10", "L1-only"]
 
 # Inception takes 3 of 13 bands. True colour, then false colour so NIR is measured too.
@@ -58,8 +64,7 @@ def to_uint8(dn, lo, hi):
 
 
 def stack_triple(dn, names, stretch):
-    chans = [to_uint8(dn[..., B[n]], stretch[n]["p2_dn"], stretch[n]["p98_dn"])
-             for n in names]
+    chans = [to_uint8(dn[..., B[n]], *stretch[n]) for n in names]
     x = torch.stack(chans, dim=1).float()
     x = torch.nn.functional.interpolate(
         x, size=(INCEPTION_SIZE, INCEPTION_SIZE), mode="bilinear",
@@ -77,8 +82,12 @@ def indices(dn):
 def main():
     device = torch.device(f"cuda:{GPU_ID}" if torch.cuda.is_available() else "cpu")
 
-    with open(os.path.join(DATA_DIR, "kid_stretch.json")) as f:
-        stretch = json.load(f)["bands"]
+    with open(os.path.join(DATA_DIR, STRETCH_FILE)) as f:
+        pct = json.load(f)["percentiles_dn"]
+    stretch = {n: (pct[n][STRETCH_PCT[0]], pct[n][STRETCH_PCT[1]]) for n in B}
+    for n, (lo, hi) in stretch.items():
+        print(f"stretch {n}: {lo:.0f} - {hi:.0f} DN  (train {STRETCH_PCT[0]}"
+              f"-{STRETCH_PCT[1]})")
     with open(os.path.join(DATA_DIR, "S2_clip.json")) as f:
         clip = {int(k): tuple(v) for k, v in json.load(f).items()}
 
@@ -157,6 +166,7 @@ def main():
         row = {"epoch": EPOCH, "split": SPLIT, "n_patches": int(n),
                "kid_subset_size": KID_SUBSET_SIZE, "kid_subsets": KID_SUBSETS,
                "index_dn_floor": INDEX_DN_FLOOR,
+               "stretch_dn": {k: list(v) for k, v in stretch.items()},
                "masked_fraction": masked_px / max(total_px, 1.0)}
         for key in TRIPLES:
             m, sd = kid[key].compute()
@@ -181,13 +191,13 @@ def main():
         return
     print(f"\n{'arm':9} {'KID rgb':>9} {'KID false':>10} {'NDVI mae':>9} "
           f"{'NDVI bias':>10} {'NDWI mae':>9} {'NDWI bias':>10} "
-          f"{'NDWI mae water':>15}")
+          f"{'NDWI mae wtr':>13} {'NDVI mae land':>14}")
     for a in sorted(results, key=lambda k: results[k]["kid_rgb_mean"]):
         r = results[a]
         print(f"{a:9} {r['kid_rgb_mean']:9.4f} {r['kid_false_colour_mean']:10.4f} "
               f"{r['ndvi_mae']:9.4f} {r['ndvi_bias']:+10.4f} "
               f"{r['ndwi_mae']:9.4f} {r['ndwi_bias']:+10.4f} "
-              f"{r['ndwi_mae_water']:15.4f}")
+              f"{r['ndwi_water_mae']:13.4f} {r['ndvi_land_mae']:14.4f}")
 
 
 if __name__ == "__main__":
